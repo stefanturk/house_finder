@@ -109,15 +109,32 @@ Lot      : {lot_size}
 
 ─── FIRST: Determine property type ────────────────────────────────────────────
 
-The API only classifies this as "Single Family" or "Multi Family".
-Based on the beds/baths/sqft numbers, infer the actual unit count:
+The API classifies this as "{home_type}". Use these rules:
 
-  Single Family = 1 unit (single dwelling)
-  Duplex       = 2 units (typical: 4–6 beds, bidirectional square feet)
-  Triplex      = 3 units (typical: 6–9 beds, or very large sqft)
-  Multi Family (4+ units) = 4 or more units (larger building)
+RULE 1 — If API says "Single Family", trust it. Output "Single Family".
 
-Example: "2815 Telegraph Ave, 4593 sqft, 6 beds, 3 ba" is likely a Triplex or Duplex.
+RULE 2 — If API says "Multi Family", it IS multi-unit. NEVER output "Single Family".
+  Use beds/baths/sqft to determine how many units:
+
+  Strong signals of Duplex (2 units):
+    - Beds 3–6, baths 2–4, sqft 1500–3500
+    - Address contains hyphen range (e.g., "123-125 Main St")
+    - sqft/beds ratio 400–700 (two side-by-side flats)
+
+  Strong signals of Triplex (3 units):
+    - Beds 4–8, baths 3–6, sqft 2500–5000
+    - Address range spans 3 addresses (e.g., "2811-2815 Telegraph")
+    - sqft/beds ratio 350–600
+
+  Strong signals of Multi Family (4+ units):
+    - Beds ≥ 8, baths ≥ 6
+    - sqft > 4000 on modest lot
+    - Address spans 4+ numbers (e.g., "2811-2821")
+
+RULE 3 — Address range is a strong signal:
+  "2811-2815 Telegraph" (4 numbers) = Triplex or larger
+  "1234-1236 Main" (3 numbers) = Duplex or Triplex
+  "123-125 Main" (2 numbers) = Duplex
 
 ─── Score each dimension 1–5 ────────────────────────────────────────────────────────────
 
@@ -457,6 +474,13 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _is_sparse(listing: dict) -> bool:
+    """Check if listing has insufficient data (foreclosure/pre-foreclosure)."""
+    sparse_fields = ("sqft", "year_built", "lot_sqft", "bedrooms", "bathrooms")
+    missing = sum(1 for f in sparse_fields if not listing.get(f))
+    return missing >= 2
+
+
 # ── Claude ────────────────────────────────────────────────────────────────────
 
 def _analyze_with_claude(listing: dict, token_totals: dict):
@@ -608,6 +632,7 @@ def main():
 
     token_totals      = {"input": 0, "output": 0}
     count_prefiltered = 0
+    count_sparse      = 0
     count_claude      = 0
     count_score_skip  = 0
     count_added       = 0
@@ -635,6 +660,30 @@ def main():
             print(f"    → SKIP: {skip_reason}")
             count_prefiltered += 1
             _save_processed(zpid, address, price, "skipped_prefilter")
+            continue
+
+        # Handle sparse listings (foreclosures/pre-foreclosures with minimal data)
+        if _is_sparse(listing):
+            print(f"    → SPARSE: insufficient data (foreclosure/pre-foreclosure)")
+            # Build synthetic analysis with all 1s
+            home_type_display = _HOME_TYPE_DISPLAY.get(
+                (listing["home_type"] or "").lower(), listing["home_type"]
+            )
+            analysis = {
+                "property_type": home_type_display,
+                "dungeon_score": 1,
+                "backyard_score": 1,
+                "lighting_score": 1,
+                "neighborhood_score": 1,
+                "turnkey_score": 1,
+                "reasoning": "Foreclosure/pre-foreclosure — insufficient data to score",
+                "concerns": None,
+            }
+            _write_sheet_row(ws, listing, analysis)
+            _save_processed(zpid, address, price, "analyzed", score=1)
+            print(f"    → ADDED ✓")
+            count_sparse += 1
+            count_added += 1
             continue
 
         analysis = _analyze_with_claude(listing, token_totals)
@@ -672,6 +721,7 @@ def main():
     print(f"  Fetched        : {len(all_listings)}")
     print(f"  New            : {len(new_listings)}")
     print(f"  Pre-filter skip: {count_prefiltered}")
+    print(f"  Sparse (no data): {count_sparse}")
     print(f"  Claude analyzed: {count_claude}")
     print(f"  Score skip     : {count_score_skip}")
     print(f"  Errors         : {count_error}")

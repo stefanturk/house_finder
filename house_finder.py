@@ -101,13 +101,25 @@ Reserve 4–5 for genuinely standout properties. A 3 means "nothing special."
 
 Address  : {address}
 Price    : {price}
-Type     : {home_type}
+API Type : {home_type}
 Beds/Ba  : {bedrooms}bd / {bathrooms}ba
 Living   : {sqft} sqft
 Year     : {year_built}
 Lot      : {lot_size}
 
-─── Score each 1–5 ────────────────────────────────────────────────────────────
+─── FIRST: Determine property type ────────────────────────────────────────────
+
+The API only classifies this as "Single Family" or "Multi Family".
+Based on the beds/baths/sqft numbers, infer the actual unit count:
+
+  Single Family = 1 unit (single dwelling)
+  Duplex       = 2 units (typical: 4–6 beds, bidirectional square feet)
+  Triplex      = 3 units (typical: 6–9 beds, or very large sqft)
+  Multi Family (4+ units) = 4 or more units (larger building)
+
+Example: "2815 Telegraph Ave, 4593 sqft, 6 beds, 3 ba" is likely a Triplex or Duplex.
+
+─── Score each dimension 1–5 ────────────────────────────────────────────────────────────
 
 DUNGEON (music studio / bonus space potential):
   5 = pre-1940, very likely has full basement or detached structure
@@ -144,9 +156,10 @@ TURNKEY (move-in readiness):
   2 = older + below-market price = likely needs meaningful work
   1 = clear fixer — very low price for area, very old, or both
 
-─── Return exactly this JSON ───────────────────────────────────────────────────
+─── Return EXACTLY this JSON (with property_type filled in) ──────────────────────────
 
 {{
+  "property_type":      "Single Family" or "Duplex" or "Triplex" or "Multi Family (4+ units)",
   "dungeon_score":      <1-5>,
   "backyard_score":     <1-5>,
   "lighting_score":     <1-5>,
@@ -228,10 +241,12 @@ def _write_sheet_row(ws: gspread.Worksheet, listing: dict, analysis: dict) -> No
     lot_sqft = listing["lot_sqft"]
     lot_str  = f"{lot_sqft:,.0f}" if lot_sqft else ""
 
-    # Map home type to display string
+    # Map home type to display string (use Claude's inferred type if available)
     home_type_display = _HOME_TYPE_DISPLAY.get(
         (listing["home_type"] or "").lower(), listing["home_type"]
     )
+    # Use Claude's property_type assessment if present (better discrimination of MultiFamily)
+    property_type = analysis.get("property_type", home_type_display)
 
     # Calculate overall score (average of 5 scores)
     d = analysis.get("dungeon_score") or 0
@@ -245,7 +260,7 @@ def _write_sheet_row(ws: gspread.Worksheet, listing: dict, analysis: dict) -> No
         listing["address"],                                          # A
         f"https://www.zillow.com/homedetails/{zpid}_zpid/",         # B
         _format_price(listing["price"]),                            # C
-        home_type_display,                                           # D
+        property_type,                                               # D
         listing["bedrooms"],                                         # E
         listing["bathrooms"],                                        # F
         overall,                                                     # G

@@ -1,0 +1,675 @@
+#!/usr/bin/env python3
+"""
+house_finder.py — Searches Zillow (via ZLLW Working API) for homes in the
+Oakland/Berkeley area, scores them on 5 dimensions with Claude, and writes
+qualifying results to Google Sheets.
+
+Scores are 1–5 (5=best):
+  Dungeon     — basement/bonus room/detached garage studio potential
+  Backyard    — outdoor space / lot size
+  Lighting    — natural indoor light
+  Neighborhood — desirability (Rockridge=5, industrial=1)
+  Turnkey     — move-in readiness (5=turnkey, 1=major reno)
+
+Run any time: fetches fresh listings, skips already-processed ones (SQLite),
+appends new qualifying rows to the sheet.
+
+NOTE: The ZLLW search API does not return listing descriptions. Claude uses
+structural data (year built, sqft, lot size, address) and its knowledge of
+Bay Area housing stock to score each dimension.
+
+Upgrade path for descriptions: subscribe to "Zillow Property Data" by APIlive
+on RapidAPI and implement fetch_property_description(zpid) — see TODO below.
+
+Usage:
+    python3 house_finder.py
+"""
+
+import os
+import re
+import json
+import time
+import sqlite3
+from datetime import datetime, timedelta
+
+import requests
+import gspread
+from google.oauth2.service_account import Credentials
+import anthropic
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
+RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
+
+# Search area — polygon drawn on geojson.io and pasted here.
+# Coordinates are [lon, lat] from GeoJSON; we convert to "lat lon, ..." for the API.
+# To update: go to geojson.io, draw a new polygon, paste the coordinates array below.
+# fmt: off
+_GEOJSON_COORDS = [  # [longitude, latitude] — GeoJSON order
+    [-122.29314373978201, 37.87517334784188],
+    [-122.26779069673918, 37.87811600119463],
+    [-122.26475511905105, 37.86245672518697],
+    [-122.25027186938382, 37.85427096115026],
+    [-122.24887702207570, 37.83552186428199],
+    [-122.25327785225014, 37.82469038854194],
+    [-122.28469671701114, 37.84772922303776],
+    [-122.28094051635887, 37.86444364565995],
+    [-122.29342092087900, 37.87550148841059],
+]
+# fmt: on
+# Build the polygon string the API expects: "lat lon, lat lon, ..."
+# Close the polygon by repeating the first point at the end.
+SEARCH_POLYGON = ", ".join(f"{lat} {lon}" for lon, lat in _GEOJSON_COORDS)
+SEARCH_POLYGON += f", {_GEOJSON_COORDS[0][1]} {_GEOJSON_COORDS[0][0]}"  # close it
+
+PRICE_MIN         = None   # None = no limit
+PRICE_MAX         = None
+MIN_BEDS          = 2
+MIN_DUNGEON_SCORE = 3      # only write to sheet if Claude dungeon_score >= this
+MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
+MAX_PER_RUN       = 20     # cap Claude calls per run (set to None for no limit)
+REQUEST_TIMEOUT   = 20
+
+# Hard pre-filters (no Claude cost, aggressively filter unsuitable listings)
+MIN_SQFT       = 1000   # skip studios / very small units
+MAX_BEDS       = 8      # proxy for 4+ unit buildings — quads/larger unwanted
+MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement likely)
+
+SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
+SHEET_TAB      = "FunkDungeons"
+CREDS_FILE     = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "credentials.json")
+DB_FILE        = os.path.join(os.path.dirname(os.path.realpath(__file__)), "house_finder.db")
+
+# ── Claude config ─────────────────────────────────────────────────────────────
+
+HAIKU_PRICE_INPUT_PER_MTOK  = 0.80
+HAIKU_PRICE_OUTPUT_PER_MTOK = 4.00
+
+CLAUDE_SYSTEM = (
+    "You are a real estate assistant helping a musician find a home in Oakland/Berkeley, CA. "
+    "Respond ONLY with valid JSON. No markdown fences, no text outside the JSON."
+)
+
+CLAUDE_PROMPT_TEMPLATE = """\
+Rate this Oakland/Berkeley area home on 5 dimensions, each scored 1–5 (5 = best).
+You do NOT have the listing description — use the structural data below and your
+knowledge of Bay Area neighborhoods and housing stock.
+
+Use the FULL 1–5 range. Scores of 1 and 2 are expected and correct for average listings.
+Reserve 4–5 for genuinely standout properties. A 3 means "nothing special."
+
+Address  : {address}
+Price    : {price}
+Type     : {home_type}
+Beds/Ba  : {bedrooms}bd / {bathrooms}ba
+Living   : {sqft} sqft
+Year     : {year_built}
+Lot      : {lot_size}
+
+─── Score each 1–5 ────────────────────────────────────────────────────────────
+
+DUNGEON (music studio / bonus space potential):
+  5 = pre-1940, very likely has full basement or detached structure
+  4 = pre-1960 on large lot — probable basement or detached garage
+  3 = 1960s–70s with decent lot, possible garage conversion or bonus room
+  2 = post-1978 or small lot — unlikely but not impossible
+  1 = almost certainly no convertible space
+
+BACKYARD (outdoor space):
+  5 = large lot >8000 sqft or ½ acre+ — great outdoor space
+  4 = 5000–8000 sqft lot, solid backyard
+  3 = 3500–5000 sqft, modest yard
+  2 = <3500 sqft or urban lot with minimal yard
+  1 = effectively no yard (row home / zero lot line)
+
+LIGHTING (natural indoor light):
+  5 = older craftsman / bungalow style — known for large windows
+  4 = pre-1960, likely good natural light
+  3 = 1960s–70s ranch, variable
+  2 = post-1978 or dense urban lot, likely less light
+  1 = very unlikely to have good natural light
+
+NEIGHBORHOOD (desirability / character):
+  5 = Rockridge, Temescal, College Ave, Montclair, Piedmont Ave, Elmwood, Claremont
+  4 = North Oakland, Grand Ave, Maxwell Park, Glenview, Albany, El Cerrito hills
+  3 = Mid-Oakland, central Berkeley flatlands, Alameda
+  2 = West Oakland, East Oakland flatlands, San Leandro
+  1 = Industrial corridors or very high crime areas
+
+TURNKEY (move-in readiness):
+  5 = higher price for the area + well-maintained era = likely turnkey
+  4 = priced fairly, reasonable age — probably in good shape
+  3 = average — could go either way without seeing it
+  2 = older + below-market price = likely needs meaningful work
+  1 = clear fixer — very low price for area, very old, or both
+
+─── Return exactly this JSON ───────────────────────────────────────────────────
+
+{{
+  "dungeon_score":      <1-5>,
+  "backyard_score":     <1-5>,
+  "lighting_score":     <1-5>,
+  "neighborhood_score": <1-5>,
+  "turnkey_score":      <1-5>,
+  "reasoning":  "<1 sentence (max 20 words) naming the key strengths and weaknesses>",
+  "concerns":   "<notable flags: HOA likely, flood zone, major arterial road, etc. — or null>"
+}}\
+"""
+
+# ── Google Sheets ─────────────────────────────────────────────────────────────
+
+SHEET_HEADERS = [
+    "Address",            # A
+    "Zillow Link",        # B
+    "Price ($M)",         # C
+    "Home Type",          # D
+    "Beds",               # E
+    "Baths",              # F
+    "Overall",            # G
+    "Dungeon",            # H
+    "Backyard",           # I
+    "Lighting",           # J
+    "Neighborhood",       # K
+    "Turnkey",            # L
+    "Living Sqft",        # M
+    "Lot Sqft",           # N
+    "Reasoning",          # O
+    "Concerns",           # P
+    "Date Found",         # Q
+]
+
+
+def _sheets_call(fn, retries=4, delay=5):
+    """Retry a gspread call on transient 500 errors."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as e:
+            if attempt < retries - 1 and "500" in str(e):
+                print(f"  [sheets] Transient error, retrying in {delay}s...")
+                time.sleep(delay)
+            else:
+                raise
+
+
+def _get_sheet() -> gspread.Worksheet:
+    creds = Credentials.from_service_account_file(
+        CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    gc = gspread.authorize(creds)
+    spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+    existing = [ws.title for ws in spreadsheet.worksheets()]
+    if SHEET_TAB not in existing:
+        print(f"  Creating '{SHEET_TAB}' tab...")
+        ws = spreadsheet.add_worksheet(title=SHEET_TAB, rows=1000, cols=len(SHEET_HEADERS) + 2)
+        _sheets_call(lambda: ws.append_row(SHEET_HEADERS))
+    else:
+        ws = spreadsheet.worksheet(SHEET_TAB)
+    return ws
+
+
+def _format_price(price) -> str:
+    try:
+        p = float(price)
+        return f"${p / 1_000_000:.2f}M"
+    except (TypeError, ValueError):
+        return ""
+
+
+_HOME_TYPE_DISPLAY = {
+    "singlefamily": "Single Family",
+    "multifamily": "Multi Family",
+}
+
+
+def _write_sheet_row(ws: gspread.Worksheet, listing: dict, analysis: dict) -> None:
+    zpid     = listing["zpid"]
+    lot_sqft = listing["lot_sqft"]
+    lot_str  = f"{lot_sqft:,.0f}" if lot_sqft else ""
+
+    # Map home type to display string
+    home_type_display = _HOME_TYPE_DISPLAY.get(
+        (listing["home_type"] or "").lower(), listing["home_type"]
+    )
+
+    # Calculate overall score (average of 5 scores)
+    d = analysis.get("dungeon_score") or 0
+    b = analysis.get("backyard_score") or 0
+    l = analysis.get("lighting_score") or 0
+    n = analysis.get("neighborhood_score") or 0
+    t = analysis.get("turnkey_score") or 0
+    overall = round((d + b + l + n + t) / 5, 1) if any([d, b, l, n, t]) else ""
+
+    row = [
+        listing["address"],                                          # A
+        f"https://www.zillow.com/homedetails/{zpid}_zpid/",         # B
+        _format_price(listing["price"]),                            # C
+        home_type_display,                                           # D
+        listing["bedrooms"],                                         # E
+        listing["bathrooms"],                                        # F
+        overall,                                                     # G
+        d,                                                           # H
+        b,                                                           # I
+        l,                                                           # J
+        n,                                                           # K
+        t,                                                           # L
+        listing["sqft"],                                             # M
+        lot_str,                                                     # N
+        analysis.get("reasoning", ""),                              # O
+        analysis.get("concerns") or "",                             # P
+        datetime.now().strftime("%Y-%m-%d %H:%M"),                  # Q
+    ]
+    _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
+
+
+# ── SQLite deduplication ──────────────────────────────────────────────────────
+
+_CREATE_TABLE = """
+CREATE TABLE IF NOT EXISTS processed_listings (
+    zpid          TEXT PRIMARY KEY,
+    address       TEXT,
+    price         INTEGER,
+    status        TEXT NOT NULL,
+    dungeon_score REAL,
+    processed_at  TEXT NOT NULL,
+    retry_after   TEXT
+)"""
+
+_RETRY_DAYS = {
+    "skipped_prefilter": 60,
+    "skipped_score":     90,
+    "error":              7,
+    # "analyzed" → retry_after = NULL (permanent)
+}
+
+
+def _load_processed_zpids() -> set:
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute(_CREATE_TABLE)
+        rows = con.execute(
+            "SELECT zpid FROM processed_listings "
+            "WHERE retry_after IS NULL OR retry_after > ?",
+            (datetime.now().isoformat(),)
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _save_processed(zpid: str, address: str, price, status: str, score=None) -> None:
+    days = _RETRY_DAYS.get(status)
+    retry_after = (datetime.now() + timedelta(days=days)).date().isoformat() if days else None
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute(_CREATE_TABLE)
+        con.execute(
+            """INSERT OR REPLACE INTO processed_listings
+               (zpid, address, price, status, dungeon_score, processed_at, retry_after)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (str(zpid), address, price, status, score,
+             datetime.now().isoformat(), retry_after)
+        )
+
+
+# ── RapidAPI ──────────────────────────────────────────────────────────────────
+
+def _lot_to_sqft(lot_obj: dict):
+    """Normalize lot size to square feet."""
+    if not lot_obj:
+        return None
+    size = lot_obj.get("lotSize")
+    unit = (lot_obj.get("lotSizeUnit") or "").lower()
+    try:
+        size = float(size)
+    except (TypeError, ValueError):
+        return None
+    return size * 43560 if "acre" in unit else size
+
+
+def _parse_listing(raw: dict):
+    """Flatten the nested ZLLW API response. Returns None if essential fields missing."""
+    prop = raw.get("property", {})
+    if not prop:
+        return None
+    zpid = prop.get("zpid")
+    if not zpid:
+        return None
+
+    addr_obj = prop.get("address", {})
+    street   = addr_obj.get("streetAddress", "")
+    city     = addr_obj.get("city", "")
+    state    = addr_obj.get("state", "CA")
+    address  = f"{street}, {city}, {state}".strip(", ")
+
+    price_obj = prop.get("price", {})
+    price     = price_obj.get("value") if isinstance(price_obj, dict) else None
+
+    return {
+        "zpid":       str(zpid),
+        "address":    address,
+        "city":       city,
+        "price":      price or 0,
+        "bedrooms":   prop.get("bedrooms", ""),
+        "bathrooms":  prop.get("bathrooms", ""),
+        "sqft":       prop.get("livingArea", ""),
+        "year_built": prop.get("yearBuilt", ""),
+        "lot_sqft":   _lot_to_sqft(prop.get("lotSizeWithUnit")),
+        "home_type":  prop.get("propertyType", ""),
+        "days_on_zillow": prop.get("daysOnZillow", ""),
+    }
+
+
+def _fetch_page(page: int = 1) -> tuple[list, int]:
+    """Fetch one page. Returns (parsed_listings, total_pages)."""
+    params = {
+        "polygon":       SEARCH_POLYGON,
+        "listingStatus": "For_Sale",
+        "propertyType":  "SingleFamily,MultiFamily",
+        "page":          page,
+    }
+    if PRICE_MIN is not None:
+        params["minPrice"] = PRICE_MIN
+    if PRICE_MAX is not None:
+        params["maxPrice"] = PRICE_MAX
+    if MIN_BEDS:
+        params["minBeds"] = MIN_BEDS
+
+    headers = {
+        "Content-Type":    "application/json",
+        "x-rapidapi-host": RAPIDAPI_HOST,
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+    }
+
+    try:
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/search/bypolygon",
+            params=params, headers=headers, timeout=REQUEST_TIMEOUT
+        )
+    except requests.exceptions.Timeout:
+        print(f"  [api] Timeout on page {page}")
+        return [], 0
+    except requests.exceptions.ConnectionError as e:
+        print(f"  [api] Connection error: {e}")
+        return [], 0
+
+    if resp.status_code != 200:
+        print(f"  [api] HTTP {resp.status_code}: {resp.text[:200]}")
+        return [], 0
+
+    try:
+        data = resp.json()
+    except Exception:
+        print(f"  [api] Non-JSON response")
+        return [], 0
+
+    raw_results = data.get("searchResults", [])
+    listings    = [l for l in (_parse_listing(r) for r in raw_results) if l]
+    total_pages = int((data.get("pagesInfo") or {}).get("totalPages") or 1)
+    return listings, total_pages
+
+
+# ── Pre-filter ────────────────────────────────────────────────────────────────
+
+def _passes_prefilter(listing: dict) -> tuple[bool, str]:
+    """Hard pre-filters — skip if fails any of these checks."""
+    # Reject condos / townhouses — no studio space potential
+    home_type = (listing.get("home_type") or "").lower()
+    allowed_types = {"singlefamily", "multifamily"}
+    if home_type and not any(t in home_type for t in allowed_types):
+        return False, f"property type '{listing['home_type']}' not singleFamily/multiFamily"
+
+    # Check sqft
+    try:
+        if listing["sqft"] and int(listing["sqft"]) < MIN_SQFT:
+            return False, f"sqft {listing['sqft']} < {MIN_SQFT}"
+    except (ValueError, TypeError):
+        pass
+
+    # Check beds (proxy for unit count)
+    try:
+        if listing["bedrooms"] and int(listing["bedrooms"]) > MAX_BEDS:
+            return False, f"beds {listing['bedrooms']} > {MAX_BEDS} (likely 4+ units)"
+    except (ValueError, TypeError):
+        pass
+
+    # Check age + lot size combo: new construction on small lot = no basement likely
+    year = listing["year_built"]
+    lot = listing["lot_sqft"]
+    try:
+        if year and int(year) > MIN_YEAR_OLD and (not lot or lot < 5000):
+            return False, f"post-{MIN_YEAR_OLD} + small lot ({lot} sqft) = no basement"
+    except (ValueError, TypeError):
+        pass
+
+    return True, ""
+
+
+# ── Claude ────────────────────────────────────────────────────────────────────
+
+def _analyze_with_claude(listing: dict, token_totals: dict):
+    client = anthropic.Anthropic()
+
+    try:
+        price_str = f"${int(listing['price']):,}"
+    except (ValueError, TypeError):
+        price_str = str(listing["price"])
+
+    lot_sqft = listing["lot_sqft"]
+    if lot_sqft:
+        lot_str = f"{lot_sqft:,.0f} sqft"
+        if lot_sqft >= 43560:
+            lot_str += f" ({lot_sqft / 43560:.2f} acres)"
+    else:
+        lot_str = "unknown"
+
+    prompt = CLAUDE_PROMPT_TEMPLATE.format(
+        address=listing["address"],
+        price=price_str,
+        home_type=listing["home_type"],
+        bedrooms=listing["bedrooms"] or "?",
+        bathrooms=listing["bathrooms"] or "?",
+        sqft=listing["sqft"] or "?",
+        year_built=listing["year_built"] or "unknown",
+        lot_size=lot_str,
+    )
+
+    print(f"    → Sending to Claude...")
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=500,
+            system=CLAUDE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        token_totals["input"]  += response.usage.input_tokens
+        token_totals["output"] += response.usage.output_tokens
+        raw = response.content[0].text.strip()
+    except Exception as e:
+        print(f"    ✗ Claude API error: {e}")
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        # Log the response
+        d = parsed.get("dungeon_score", "?")
+        b = parsed.get("backyard_score", "?")
+        l = parsed.get("lighting_score", "?")
+        n = parsed.get("neighborhood_score", "?")
+        turnkey = parsed.get("turnkey_score", "?")
+        print(f"    ← Dungeon:{d} Backyard:{b} Light:{l} Hood:{n} Turnkey:{turnkey}")
+        return parsed
+    except json.JSONDecodeError:
+        raw_clean = re.sub(r"```(?:json)?", "", raw).strip()
+        match = re.search(r"\{.*\}", raw_clean, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+                d = parsed.get("dungeon_score", "?")
+                b = parsed.get("backyard_score", "?")
+                l = parsed.get("lighting_score", "?")
+                n = parsed.get("neighborhood_score", "?")
+                turnkey = parsed.get("turnkey_score", "?")
+                print(f"    ← Dungeon:{d} Backyard:{b} Light:{l} Hood:{n} Turnkey:{turnkey} [parsed]")
+                return parsed
+            except json.JSONDecodeError:
+                pass
+        print(f"    ✗ Could not parse JSON. Raw: {raw[:200]}")
+        return None
+
+
+# ── TODO: Description upgrade ─────────────────────────────────────────────────
+# To make all 5 scores much more accurate, subscribe to "Zillow Property Data"
+# by APIlive on RapidAPI and implement:
+#
+# def _fetch_description(zpid: str) -> str | None:
+#     resp = requests.get(
+#         "https://zillow-property-data.p.rapidapi.com/property",
+#         params={"zpid": zpid},
+#         headers={"x-rapidapi-host": "zillow-property-data.p.rapidapi.com",
+#                  "x-rapidapi-key": RAPIDAPI_KEY},
+#         timeout=REQUEST_TIMEOUT,
+#     )
+#     if resp.status_code == 200:
+#         data = resp.json()
+#         return data.get("description") or data.get("homeDescription")
+#     return None
+#
+# Then add the description to the Claude prompt template.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    print("=" * 60)
+    print("FunkDungeonFinder")
+    print("=" * 60)
+
+    if not RAPIDAPI_KEY:
+        print("ERROR: RAPIDAPI_KEY env var not set.")
+        print("Run: export RAPIDAPI_KEY=your_key   (or add to ~/.zshrc)")
+        return
+
+    # ── 1. Connect Sheets ─────────────────────────────────────────────────────
+    print("\nConnecting to Google Sheets...")
+    try:
+        ws = _get_sheet()
+        print(f"  Connected to '{SHEET_TAB}'.")
+    except Exception as e:
+        print(f"  Sheets error: {e}")
+        return
+
+    # ── 2. Load processed zpids ───────────────────────────────────────────────
+    print("\nLoading processed listings...")
+    processed = _load_processed_zpids()
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute(_CREATE_TABLE)
+        total_db       = con.execute("SELECT COUNT(*) FROM processed_listings").fetchone()[0]
+        retry_eligible = total_db - len(processed)
+    print(f"  {total_db} tracked ({len(processed)} active skips, {retry_eligible} retry-eligible)")
+
+    # ── 3. Fetch listings ─────────────────────────────────────────────────────
+    print(f"\nFetching listings (polygon search area)...")
+    all_listings = []
+    for page in range(1, MAX_PAGES + 1):
+        print(f"  Page {page}...", end=" ", flush=True)
+        listings, total_pages = _fetch_page(page)
+        print(f"{len(listings)} listings (total pages: {total_pages})")
+        all_listings.extend(listings)
+        if page >= total_pages:
+            break
+        time.sleep(0.5)
+    print(f"  {len(all_listings)} total fetched.")
+
+    # ── 4. Deduplicate ────────────────────────────────────────────────────────
+    new_listings = [l for l in all_listings if l["zpid"] not in processed]
+    print(f"  {len(new_listings)} new, {len(all_listings) - len(new_listings)} already seen.")
+
+    if not new_listings:
+        print("\nNo new listings. Done.")
+        return
+
+    # ── 5-7. Pre-filter → Claude → Sheet ─────────────────────────────────────
+    print(f"\nAnalyzing {len(new_listings)} new listings "
+          f"(writing to sheet if dungeon_score >= {MIN_DUNGEON_SCORE})...\n")
+
+    token_totals      = {"input": 0, "output": 0}
+    count_prefiltered = 0
+    count_claude      = 0
+    count_score_skip  = 0
+    count_added       = 0
+    count_error       = 0
+
+    for listing in new_listings:
+        # Stop after MAX_PER_RUN Claude calls
+        if MAX_PER_RUN and count_claude >= MAX_PER_RUN:
+            print(f"  [stopping: reached MAX_PER_RUN={MAX_PER_RUN} Claude calls]")
+            break
+
+        zpid    = listing["zpid"]
+        address = listing["address"]
+        price   = listing["price"]
+        sqft    = listing["sqft"]
+        year    = listing["year_built"]
+        lot     = listing["lot_sqft"]
+
+        lot_str = f"{lot:,.0f}sqft lot" if lot else "lot unknown"
+        print(f"  {address}")
+        print(f"    {sqft}sqft | built {year} | {lot_str} | {_format_price(price)}")
+
+        passes, skip_reason = _passes_prefilter(listing)
+        if not passes:
+            print(f"    → SKIP: {skip_reason}")
+            count_prefiltered += 1
+            _save_processed(zpid, address, price, "skipped_prefilter")
+            continue
+
+        analysis = _analyze_with_claude(listing, token_totals)
+        count_claude += 1
+
+        if analysis is None:
+            count_error += 1
+            _save_processed(zpid, address, price, "error")
+            continue
+
+        d = analysis.get("dungeon_score", 0)
+        b = analysis.get("backyard_score", 0)
+        l = analysis.get("lighting_score", 0)
+        n = analysis.get("neighborhood_score", 0)
+        turnkey = analysis.get("turnkey_score", 0)
+        print(f"    Dungeon:{d} Backyard:{b} Light:{l} Hood:{n} Turnkey:{turnkey}")
+
+        if d >= MIN_DUNGEON_SCORE:
+            _write_sheet_row(ws, listing, analysis)
+            _save_processed(zpid, address, price, "analyzed", score=d)
+            print(f"    → ADDED ✓")
+            count_added += 1
+        else:
+            _save_processed(zpid, address, price, "skipped_score", score=d)
+            print(f"    → SKIP: dungeon {d} < {MIN_DUNGEON_SCORE}")
+            count_score_skip += 1
+
+    # ── 8. Summary ────────────────────────────────────────────────────────────
+    tok_in  = token_totals["input"]
+    tok_out = token_totals["output"]
+    cost    = (tok_in  / 1_000_000 * HAIKU_PRICE_INPUT_PER_MTOK +
+               tok_out / 1_000_000 * HAIKU_PRICE_OUTPUT_PER_MTOK)
+
+    print(f"\n{'=' * 60}")
+    print(f"  Fetched        : {len(all_listings)}")
+    print(f"  New            : {len(new_listings)}")
+    print(f"  Pre-filter skip: {count_prefiltered}")
+    print(f"  Claude analyzed: {count_claude}")
+    print(f"  Score skip     : {count_score_skip}")
+    print(f"  Errors         : {count_error}")
+    print(f"  Added to sheet : {count_added}")
+    print(f"  Tokens         : {tok_in:,} in / {tok_out:,} out")
+    print(f"  Est. cost      : ${cost:.4f}")
+
+    # Pirate mode summary
+    if count_added > 0:
+        print()
+        print(f"  🏴‍☠️  Ahoy! {count_added} dungeon(s) plundered from Ye Olde Zillow, matey!")
+    print()
+
+
+if __name__ == "__main__":
+    main()

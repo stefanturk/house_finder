@@ -45,17 +45,13 @@ RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
 # Search area — polygon drawn on geojson.io and pasted here.
 # Coordinates are [lon, lat] from GeoJSON; we convert to "lat lon, ..." for the API.
 # To update: go to geojson.io, draw a new polygon, paste the coordinates array below.
+# Larger Bay Area polygon covering Oakland and Berkeley
 # fmt: off
 _GEOJSON_COORDS = [  # [longitude, latitude] — GeoJSON order
-    [-122.29314373978201, 37.87517334784188],
-    [-122.26779069673918, 37.87811600119463],
-    [-122.26475511905105, 37.86245672518697],
-    [-122.25027186938382, 37.85427096115026],
-    [-122.24887702207570, 37.83552186428199],
-    [-122.25327785225014, 37.82469038854194],
-    [-122.28469671701114, 37.84772922303776],
-    [-122.28094051635887, 37.86444364565995],
-    [-122.29342092087900, 37.87550148841059],
+    [-122.35, 37.72],  # Southwest: San Leandro
+    [-122.11, 37.72],  # Southeast: Hills
+    [-122.11, 37.91],  # Northeast: El Cerrito/Albany
+    [-122.35, 37.91],  # Northwest: Bay
 ]
 # fmt: on
 # Build the polygon string the API expects: "lat lon, lat lon, ..."
@@ -143,18 +139,23 @@ RULE 3 — Address range is a strong signal:
 ─── Score each dimension 1–5 ────────────────────────────────────────────────────────────
 
 DUNGEON (music studio / bonus space potential):
-  5 = pre-1940, very likely has full basement or detached structure
-  4 = pre-1960 on large lot — probable basement or detached garage
-  3 = 1960s–70s with decent lot, possible garage conversion or bonus room
-  2 = post-1978 or small lot — unlikely but not impossible
-  1 = almost certainly no convertible space
+  CRITICAL RULE: If description mentions ADU (accessory dwelling unit) → score 1.
+    ADUs are rental units, not studio space for the owner.
+  RULE: If description doesn't mention basement, bonus room, studio, detached garage,
+    or similar music-studio-worthy space → score 1. No guessing.
+  5 = description specifically brags about basement, bonus room, or studio space
+  4 = description mentions potential bonus/garage conversion space or detached structure
+  3 = description hints at extra rooms or old enough house that may have basement (1960s-70s)
+  2 = description provides no evidence but structure might support it (pre-1978, large lot)
+  1 = mentions ADU OR description silent on bonus space OR post-1978 + small lot
 
 BACKYARD (outdoor space):
-  5 = large lot >8000 sqft or ½ acre+ — great outdoor space
-  4 = 5000–8000 sqft lot, solid backyard
-  3 = 3500–5000 sqft, modest yard
-  2 = <3500 sqft or urban lot with minimal yard
-  1 = effectively no yard (row home / zero lot line)
+  RULE: If description doesn't mention backyard, yard, patio, deck, or outdoor space → score 1.
+  5 = description specifically highlights large backyard, deck, patio, or outdoor features
+  4 = description mentions decent yard or outdoor space
+  3 = description mentions some outdoor area or yard
+  2 = description mentions patio/deck but minimal yard
+  1 = description silent on backyard/yard/outdoor space OR mentions none
 
 LIGHTING (natural indoor light):
   5 = older craftsman / bungalow style — known for large windows

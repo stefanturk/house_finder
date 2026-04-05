@@ -6,6 +6,12 @@ Run: python3 gui.py or ./gui
 Then open http://localhost:5001 (or http://<local_ip>:5001 to share with others on the same WiFi)
 """
 
+import warnings
+
+# Suppress warnings BEFORE importing anything else
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*Python version.*")
+warnings.filterwarnings("ignore", message=".*urllib3.*only supports OpenSSL.*")
+
 import os
 import json
 import subprocess

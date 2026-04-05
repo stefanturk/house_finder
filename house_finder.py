@@ -25,12 +25,17 @@ Usage:
     python3 house_finder.py
 """
 
+import warnings
+
+# Suppress warnings BEFORE importing anything else
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*Python version.*")
+warnings.filterwarnings("ignore", message=".*urllib3.*only supports OpenSSL.*")
+
 import os
 import re
 import json
 import time
 import sqlite3
-import warnings
 from datetime import datetime, timedelta
 
 import requests
@@ -41,9 +46,6 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file (if it exists)
 load_dotenv()
-
-# Suppress Python 3.9 EOL warnings from google-auth
-warnings.filterwarnings("ignore", category=FutureWarning, module="google.*")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 

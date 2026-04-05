@@ -786,6 +786,30 @@ def main():
 
         # Handle sparse listings (foreclosures/pre-foreclosures with minimal data)
         if _is_sparse(listing):
+            # Reject Multi Family properties with insufficient data — can't verify unit count
+            home_type_api = (listing.get("home_type") or "").lower()
+            is_multifamily = "multifamily" in home_type_api
+
+            # Safely parse bed/bath counts
+            try:
+                beds = int(listing.get("bedrooms") or 0)
+            except (ValueError, TypeError):
+                beds = 0
+            try:
+                baths = int(listing.get("bathrooms") or 0)
+            except (ValueError, TypeError):
+                baths = 0
+
+            has_range_address = "-" in address and not address.startswith("-")
+
+            # Reject Multi Family if: sparse data + range address (can't determine unit count safely)
+            # OR high bed/bath counts suggesting 4+ units
+            if is_multifamily and (has_range_address or beds >= 8 or baths >= 6):
+                _save_processed(zpid, address, price, "skipped_score", score=1)
+                print(f"    → SKIP: Multi Family with insufficient data (can't verify unit count)")
+                count_score_skip += 1
+                continue
+
             print(f"    → SPARSE: insufficient data (foreclosure/pre-foreclosure)")
             # Build synthetic analysis with all 1s
             home_type_display = _HOME_TYPE_DISPLAY.get(
@@ -822,11 +846,34 @@ def main():
             _save_processed(zpid, address, price, "error")
             continue
 
-        # Reject 4+ unit properties
+        # Reject 4+ unit properties — check both Claude's output and API data
         prop_type = analysis.get("property_type", "")
-        if "4+" in prop_type or "quad" in prop_type.lower() or "multi family (4+" in prop_type.lower():
+        home_type_api = (listing.get("home_type") or "").lower()
+        is_multifamily_api = "multifamily" in home_type_api
+
+        # Safely parse bed/bath counts
+        try:
+            beds = int(listing.get("bedrooms") or 0)
+        except (ValueError, TypeError):
+            beds = 0
+        try:
+            baths = int(listing.get("bathrooms") or 0)
+        except (ValueError, TypeError):
+            baths = 0
+
+        has_range_address = "-" in address and not address.startswith("-")
+
+        # Multi-pronged rejection: Claude output OR API data + bed/bath signals
+        skip_4plus = (
+            "4+" in prop_type or
+            "quad" in prop_type.lower() or
+            "multi family (4+" in prop_type.lower() or
+            (is_multifamily_api and (beds >= 8 or baths >= 6 or (has_range_address and beds >= 4)))
+        )
+
+        if skip_4plus:
             _save_processed(zpid, address, price, "skipped_score", score=1)
-            print(f"    → SKIP: 4+ unit property (not buying), labeled as {prop_type}")
+            print(f"    → SKIP: 4+ unit property (API: {home_type_api}, beds: {beds}, baths: {baths})")
             count_score_skip += 1
             continue
 

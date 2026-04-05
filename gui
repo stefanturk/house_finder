@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Load environment variables (RAPIDAPI_KEY, ANTHROPIC_API_KEY)
+source "$HOME/.zshrc" 2>/dev/null || true
+
+# Run the GUI
+python3 "$SCRIPT_DIR/gui.py"

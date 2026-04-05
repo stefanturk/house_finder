@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>House Finder — Polygon Search</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <!-- Leaflet Draw CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+
+        .sidebar {
+            width: 300px;
+            display: flex;
+            flex-direction: column;
+            background: #f5f5f5;
+            border-right: 1px solid #ddd;
+            overflow-y: auto;
+        }
+
+        .sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid #ddd;
+            background: #fff;
+            font-weight: 600;
+            font-size: 16px;
+        }
+
+        .polygons-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .polygon-item {
+            padding: 12px;
+            margin: 4px 0;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .polygon-item:hover {
+            background: #f0f7ff;
+            border-color: #0066cc;
+        }
+
+        .polygon-item.active {
+            background: #e3f2fd;
+            border-color: #0066cc;
+        }
+
+        .polygon-name {
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .polygon-delete {
+            background: #ff5252;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .polygon-delete:hover {
+            background: #ff1744;
+        }
+
+        .run-button {
+            margin: 8px;
+            padding: 12px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .run-button:hover {
+            background: #45a049;
+        }
+
+        .run-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .log-panel {
+            padding: 12px;
+            border-top: 1px solid #ddd;
+            background: white;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            max-height: 200px;
+            overflow-y: auto;
+            border-radius: 4px;
+            background: #f9f9f9;
+        }
+
+        .log-line {
+            color: #333;
+            line-height: 1.4;
+        }
+
+        #map {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="sidebar-header">Polygons</div>
+            <div class="polygons-list" id="polygonsList"></div>
+            <button class="run-button" id="runBtn" onclick="runSearch()">Run Search</button>
+            <div class="log-panel" id="logPanel"></div>
+        </div>
+
+        <!-- Map -->
+        <div id="map"></div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <!-- Leaflet Draw JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+    <script>
+        let map, drawnItems, polygons = [];
+
+        // Initialize map
+        map = L.map('map').setView([37.83, -122.27], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        drawnItems = new L.FeatureGroup();
+        map.addLayer(drawnItems);
+
+        // Draw control
+        const drawControl = new L.Control.Draw({
+            draw: {
+                polygon: true,
+                marker: false,
+                polyline: false,
+                rectangle: false,
+                circle: false,
+                circlemarker: false
+            },
+            edit: {
+                featureGroup: drawnItems,
+                remove: false
+            }
+        });
+        map.addControl(drawControl);
+
+        // Load polygons on startup
+        loadPolygons();
+
+        // Save whenever a polygon is drawn or edited
+        map.on('draw:created', function(e) {
+            const layer = e.layer;
+            drawnItems.addLayer(layer);
+            savePolygonsFromMap();
+        });
+
+        map.on('draw:edited', function(e) {
+            savePolygonsFromMap();
+        });
+
+        map.on('draw:deleted', function(e) {
+            savePolygonsFromMap();
+        });
+
+        // Load and render polygons
+        function loadPolygons() {
+            fetch('/polygons')
+                .then(r => r.json())
+                .then(data => {
+                    polygons = data || [];
+                    drawnItems.clearLayers();
+
+                    // Render existing polygons on map
+                    polygons.forEach((coords, idx) => {
+                        const polygon = L.polygon(
+                            coords.map(([lon, lat]) => [lat, lon]),  // Leaflet uses [lat, lon]
+                            { color: '#0066cc' }
+                        );
+                        polygon.polygonIndex = idx;
+                        drawnItems.addLayer(polygon);
+                    });
+
+                    renderPolygonsList();
+                })
+                .catch(err => log('Error loading polygons: ' + err));
+        }
+
+        // Save polygons from drawn items
+        function savePolygonsFromMap() {
+            const newPolygons = [];
+            drawnItems.eachLayer(function(layer) {
+                if (layer instanceof L.Polygon && !(layer instanceof L.Rectangle)) {
+                    // Convert from Leaflet [lat, lon] to GeoJSON [lon, lat]
+                    const coords = layer.getLatLngs()[0].map(ll => [ll.lng, ll.lat]);
+                    newPolygons.push(coords);
+                }
+            });
+
+            polygons = newPolygons;
+
+            fetch('/polygons', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(polygons)
+            })
+            .then(r => r.json())
+            .then(data => {
+                renderPolygonsList();
+                log('Polygons saved (' + polygons.length + ')');
+            })
+            .catch(err => log('Error saving: ' + err));
+        }
+
+        // Render list of polygons
+        function renderPolygonsList() {
+            const list = document.getElementById('polygonsList');
+            list.innerHTML = polygons.map((_, idx) => `
+                <div class="polygon-item" onclick="highlightPolygon(${idx})">
+                    <span class="polygon-name">Polygon ${idx + 1}</span>
+                    <button class="polygon-delete" onclick="deletePolygon(${idx}, event)">Delete</button>
+                </div>
+            `).join('');
+        }
+
+        // Delete a polygon
+        function deletePolygon(idx, event) {
+            event.stopPropagation();
+            polygons.splice(idx, 1);
+            savePolygonsToServer();
+        }
+
+        // Highlight polygon on map
+        function highlightPolygon(idx) {
+            // Stub: could highlight the layer on hover
+        }
+
+        // Save polygons to server
+        function savePolygonsToServer() {
+            fetch('/polygons', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(polygons)
+            })
+            .then(r => r.json())
+            .then(data => {
+                loadPolygons();
+                log('Polygons updated');
+            })
+            .catch(err => log('Error: ' + err));
+        }
+
+        // Run search
+        function runSearch() {
+            if (polygons.length === 0) {
+                alert('Draw at least one polygon first');
+                return;
+            }
+
+            const runBtn = document.getElementById('runBtn');
+            runBtn.disabled = true;
+            clearLog();
+            log('Starting search...');
+
+            const eventSource = new EventSource('/run');
+
+            eventSource.onmessage = function(event) {
+                if (event.data === '[done]') {
+                    eventSource.close();
+                    runBtn.disabled = false;
+                    log('Search complete');
+                } else {
+                    log(event.data);
+                }
+            };
+
+            eventSource.onerror = function(err) {
+                eventSource.close();
+                runBtn.disabled = false;
+                log('Error: connection closed');
+            };
+        }
+
+        // Logging
+        function log(msg) {
+            const panel = document.getElementById('logPanel');
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.textContent = msg;
+            panel.appendChild(line);
+            panel.scrollTop = panel.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('logPanel').innerHTML = '';
+        }
+    </script>
+</body>
+</html>

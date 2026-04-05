@@ -46,17 +46,37 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="google.*")
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
 
-# Search area — polygon from geojson.io
-# GeoJSON coordinates are [lon, lat]; convert to "lat lon, lat lon, ..." format for API
-_GEOJSON_COORDS = [  # [longitude, latitude] — GeoJSON order
+# Search areas — load from polygons.json (created by GUI)
+# Falls back to hardcoded polygon if file not found
+POLYGONS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "polygons.json")
+
+# Fallback polygon (used if polygons.json not found)
+_FALLBACK_COORDS = [
     [-122.28107884234528, 37.86430689180793],
     [-122.2775151935528, 37.843896501632074],
     [-122.24658191947155, 37.847923592652435],
     [-122.25216342051922, 37.867467513916694],
     [-122.28107884234528, 37.86430689180793],  # closes polygon
 ]
-# Build polygon string: "lat lon, lat lon, ..." (note: lat first!)
-SEARCH_POLYGON = ", ".join(f"{lat} {lon}" for lon, lat in _GEOJSON_COORDS)
+
+
+def _load_polygons() -> list:
+    """
+    Load polygon strings from polygons.json (created by GUI).
+    Falls back to hardcoded polygon if file not found or invalid.
+    Returns list of polygon strings in "lat lon, lat lon, ..." format.
+    """
+    try:
+        with open(POLYGONS_FILE) as f:
+            all_coords = json.load(f)
+        if not all_coords:
+            raise ValueError("empty polygons.json")
+        # Convert each polygon from [lon, lat] pairs to "lat lon, ..." string
+        return [", ".join(f"{lat} {lon}" for lon, lat in coords) for coords in all_coords]
+    except Exception:
+        # Fallback: return hardcoded polygon
+        fallback_str = ", ".join(f"{lat} {lon}" for lon, lat in _FALLBACK_COORDS)
+        return [fallback_str]
 
 PRICE_MIN         = None   # None = no limit
 PRICE_MAX         = None
@@ -385,12 +405,14 @@ def _parse_listing(raw: dict):
     }
 
 
-def _fetch_page(page: int = 1) -> tuple[list, int]:
-    """Fetch one page. Returns (parsed_listings, total_pages)."""
+def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
+    """Fetch one page for a given polygon. Returns (parsed_listings, total_pages)."""
+    if not polygon:
+        return [], 0
     if page == 1:
-        print(f"  [search] polygon: {SEARCH_POLYGON[:60]}...")
+        print(f"    [polygon] {polygon[:50]}...")
     params = {
-        "polygon":       SEARCH_POLYGON,
+        "polygon":       polygon,
         "listingStatus": "For_Sale",
         "propertyType":  "SingleFamily,MultiFamily",
         "page":          page,
@@ -638,16 +660,23 @@ def main():
     print(f"  {total_db} tracked ({len(processed)} active skips, {retry_eligible} retry-eligible)")
 
     # ── 3. Fetch listings ─────────────────────────────────────────────────────
-    print(f"\nFetching listings (polygon search area)...")
+    polygons = _load_polygons()
+    print(f"\nFetching listings ({len(polygons)} polygon{'s' if len(polygons) != 1 else ''})...")
     all_listings = []
-    for page in range(1, MAX_PAGES + 1):
-        print(f"  Page {page}...", end=" ", flush=True)
-        listings, total_pages = _fetch_page(page)
-        print(f"{len(listings)} listings (total pages: {total_pages})")
-        all_listings.extend(listings)
-        if page >= total_pages:
-            break
-        time.sleep(0.5)
+    seen_zpids_this_run = set()
+    for poly_idx, polygon in enumerate(polygons, 1):
+        print(f"  Polygon {poly_idx}/{len(polygons)}...")
+        for page in range(1, MAX_PAGES + 1):
+            print(f"    Page {page}...", end=" ", flush=True)
+            listings, total_pages = _fetch_page(page, polygon)
+            # Deduplicate across polygons (same zpid shouldn't appear twice)
+            new_listings = [l for l in listings if l["zpid"] not in seen_zpids_this_run]
+            seen_zpids_this_run.update(l["zpid"] for l in new_listings)
+            print(f"{len(new_listings)} new listings (total pages: {total_pages})")
+            all_listings.extend(new_listings)
+            if page >= total_pages:
+                break
+            time.sleep(0.5)
     print(f"  {len(all_listings)} total fetched.")
 
     # ── 4. Deduplicate ────────────────────────────────────────────────────────

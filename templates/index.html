@@ -342,6 +342,7 @@
         const buyMarkersGroup = new L.FeatureGroup();
         let allBuyMarkers = [];
         let allRentMarkers = [];
+        const markersByAddress = {};  // Map address -> { buy: marker, rent: marker }
 
         // Initialize map
         map = L.map('map').setView([37.83, -122.27], 12);
@@ -509,6 +510,13 @@
                         marker.address = listing.address;
                         marker.mode = mode;
                         marker.isFavorite = isFavorite;
+                        marker.score = score;
+
+                        // Store marker in lookup table by address
+                        if (!markersByAddress[listing.address]) {
+                            markersByAddress[listing.address] = {};
+                        }
+                        markersByAddress[listing.address][mode] = marker;
 
                         const favoriteBtn = `<button class="fav-btn" style="background: ${isFavorite ? '#3498db' : '#ddd'}; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-weight: 600;" data-address="${listing.address.replace(/"/g, '&quot;')}" data-mode="${mode}">${isFavorite ? '★ Favorited' : '☆ Favorite'}</button>`;
 
@@ -747,6 +755,19 @@
                         btn.textContent = isFav ? '★ Favorited' : '☆ Favorite';
                         btn.style.background = isFav ? '#3498db' : '#ddd';
                         log(`${isFav ? '♥' : '♡'} ${address.split(',')[0]}`);
+
+                        // Update marker color immediately
+                        const marker = markersByAddress[address] && markersByAddress[address][mode];
+                        if (marker) {
+                            let newColor;
+                            if (isFav) {
+                                newColor = '#3498db';  // blue for favorites
+                            } else {
+                                newColor = marker.score >= 4 ? '#2ecc71' : marker.score >= 3 ? '#f39c12' : '#e74c3c';
+                            }
+                            marker.setStyle({ fillColor: newColor });
+                            marker.isFavorite = isFav;
+                        }
                     }
                 })
                 .catch(err => log('Error updating favorite: ' + err));

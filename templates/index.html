@@ -277,6 +277,116 @@
             overflow-y: auto;
             min-height: 0;
         }
+
+        /* Email recipients overlay */
+        .email-btn-overlay {
+            position: absolute;
+            top: 80px;
+            right: 10px;
+            z-index: 1000;
+        }
+
+        .email-btn {
+            background: white;
+            border: 2px solid rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            color: #333;
+            box-shadow: 0 1px 5px rgba(0, 0, 0, 0.2);
+            white-space: nowrap;
+        }
+
+        .email-btn:hover {
+            background: #f5f5f5;
+        }
+
+        .email-panel {
+            display: none;
+            position: absolute;
+            top: 38px;
+            right: 0;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 12px;
+            min-width: 280px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1001;
+        }
+
+        .email-panel.open {
+            display: block;
+        }
+
+        .email-panel-title {
+            font-weight: 600;
+            font-size: 13px;
+            margin-bottom: 8px;
+            color: #333;
+        }
+
+        .email-recipient-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin: 4px 0;
+            font-size: 12px;
+        }
+
+        .email-recipient-addr {
+            flex: 1;
+            color: #555;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .email-remove-btn {
+            background: none;
+            border: none;
+            color: #ff5252;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            padding: 0 4px;
+            line-height: 1;
+        }
+
+        .email-remove-btn:hover {
+            color: #ff1744;
+        }
+
+        .email-add-row {
+            display: flex;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .email-add-input {
+            flex: 1;
+            padding: 5px 8px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+
+        .email-add-button {
+            padding: 5px 10px;
+            background: #0066cc;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .email-add-button:hover {
+            background: #0052a3;
+        }
     </style>
 </head>
 <body>
@@ -338,6 +448,19 @@
         <!-- Map area (with position:relative for overlay positioning) -->
         <div style="position: relative; flex: 1;">
             <div id="map"></div>
+
+            <!-- Email recipients overlay -->
+            <div class="email-btn-overlay">
+                <button class="email-btn" onclick="toggleEmailPanel()">✉ Email</button>
+                <div class="email-panel" id="emailPanel">
+                    <div class="email-panel-title">Email Recipients</div>
+                    <div id="emailRecipientsList"></div>
+                    <div class="email-add-row">
+                        <input class="email-add-input" type="email" id="emailAddInput" placeholder="you@example.com">
+                        <button class="email-add-button" onclick="addEmailRecipient()">Add</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -863,6 +986,80 @@
         function clearLog() {
             document.getElementById('logPanel').innerHTML = '';
         }
+
+        // ── Email recipients management ───────────────────────────────────────
+        let emailRecipients = [];
+
+        function toggleEmailPanel() {
+            const panel = document.getElementById('emailPanel');
+            panel.classList.toggle('open');
+            if (panel.classList.contains('open')) {
+                loadEmailRecipients();
+            }
+        }
+
+        function loadEmailRecipients() {
+            fetch('/email_recipients')
+                .then(r => r.json())
+                .then(data => {
+                    emailRecipients = data || [];
+                    renderEmailRecipients();
+                })
+                .catch(err => console.error('Error loading recipients:', err));
+        }
+
+        function renderEmailRecipients() {
+            const list = document.getElementById('emailRecipientsList');
+            if (emailRecipients.length === 0) {
+                list.innerHTML = '<div style="color: #999; font-size: 12px; font-style: italic;">No recipients yet</div>';
+                return;
+            }
+            list.innerHTML = emailRecipients.map((addr, idx) => `
+                <div class="email-recipient-row">
+                    <span class="email-recipient-addr" title="${addr}">${addr}</span>
+                    <button class="email-remove-btn" onclick="removeEmailRecipient(${idx})">×</button>
+                </div>
+            `).join('');
+        }
+
+        function addEmailRecipient() {
+            const input = document.getElementById('emailAddInput');
+            const addr = (input.value || '').trim();
+            if (!addr || !addr.includes('@')) {
+                input.style.borderColor = '#ff5252';
+                setTimeout(() => input.style.borderColor = '#ddd', 1500);
+                return;
+            }
+            if (emailRecipients.includes(addr)) return;  // no duplicates
+            emailRecipients.push(addr);
+            input.value = '';
+            saveEmailRecipients();
+        }
+
+        function removeEmailRecipient(idx) {
+            emailRecipients.splice(idx, 1);
+            saveEmailRecipients();
+        }
+
+        function saveEmailRecipients() {
+            fetch('/email_recipients', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(emailRecipients)
+            })
+            .then(r => r.json())
+            .then(() => renderEmailRecipients())
+            .catch(err => console.error('Error saving recipients:', err));
+        }
+
+        // Close panel on outside click
+        document.addEventListener('click', function(e) {
+            const panel = document.getElementById('emailPanel');
+            const btn = e.target.closest('.email-btn-overlay');
+            if (!btn && panel && panel.classList.contains('open')) {
+                panel.classList.remove('open');
+            }
+        });
     </script>
 </body>
 </html>

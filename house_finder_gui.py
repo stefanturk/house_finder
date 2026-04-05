@@ -29,6 +29,7 @@ load_dotenv()
 app = Flask(__name__)
 POLYGONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polygons.json")
 GEOCODE_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "geocode_cache.json")
+EMAIL_RECIPIENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_recipients.json")
 CREDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "credentials.json")
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
 SHEET_TAB = "House Finder"
@@ -60,6 +61,35 @@ def save_polygons():
         with open(POLYGONS_FILE, "w") as f:
             json.dump(request.json, f, indent=2)
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/email_recipients", methods=["GET"])
+def get_email_recipients():
+    """Return current email recipients from email_recipients.json."""
+    try:
+        with open(EMAIL_RECIPIENTS_FILE) as f:
+            data = json.load(f)
+        return jsonify(data)
+    except FileNotFoundError:
+        return jsonify([])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/email_recipients", methods=["POST"])
+def save_email_recipients():
+    """Save email recipients list to email_recipients.json."""
+    try:
+        recipients = request.json
+        if not isinstance(recipients, list):
+            return jsonify({"error": "Expected a JSON array"}), 400
+        # Validate and clean: all items must be strings
+        recipients = [r.strip() for r in recipients if isinstance(r, str) and r.strip()]
+        with open(EMAIL_RECIPIENTS_FILE, "w") as f:
+            json.dump(recipients, f, indent=2)
+        return jsonify({"ok": True, "count": len(recipients)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

@@ -93,7 +93,7 @@ CLAUDE_SYSTEM = (
 
 CLAUDE_PROMPT_TEMPLATE = """\
 Rate this Oakland/Berkeley area home on 5 dimensions, each scored 1–5 (5 = best).
-You do NOT have the listing description — use the structural data below and your
+Use the listing description (if available) plus structural data and your
 knowledge of Bay Area neighborhoods and housing stock.
 
 Use the FULL 1–5 range. Scores of 1 and 2 are expected and correct for average listings.
@@ -106,6 +106,10 @@ Beds/Ba  : {bedrooms}bd / {bathrooms}ba
 Living   : {sqft} sqft
 Year     : {year_built}
 Lot      : {lot_size}
+Listing Type: {listing_type}
+
+Listing Description:
+{description}
 
 ─── FIRST: Determine property type ────────────────────────────────────────────
 
@@ -211,12 +215,13 @@ SHEET_HEADERS = [
 
 
 def _sheets_call(fn, retries=4, delay=5):
-    """Retry a gspread call on transient 500 errors."""
+    """Retry a gspread call on transient 500/400 errors."""
     for attempt in range(retries):
         try:
             return fn()
         except gspread.exceptions.APIError as e:
-            if attempt < retries - 1 and "500" in str(e):
+            code = str(e)
+            if attempt < retries - 1 and ("500" in code or "400" in code):
                 print(f"  [sheets] Transient error, retrying in {delay}s...")
                 time.sleep(delay)
             else:
@@ -386,6 +391,7 @@ def _parse_listing(raw: dict):
         "lot_sqft":   _lot_to_sqft(prop.get("lotSizeWithUnit")),
         "home_type":  prop.get("propertyType", ""),
         "days_on_zillow": prop.get("daysOnZillow", ""),
+        "listing_type": None,  # Will be filled in by _fetch_property_description
     }
 
 
@@ -481,9 +487,40 @@ def _is_sparse(listing: dict) -> bool:
     return missing >= 2
 
 
+# ── Property Details (descriptions) ───────────────────────────────────────────
+
+def _fetch_property_description(address: str) -> dict:
+    """Fetch full property details from /pro/byaddress endpoint."""
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "x-rapidapi-host": RAPIDAPI_HOST,
+            "x-rapidapi-key": RAPIDAPI_KEY,
+        }
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/pro/byaddress",
+            params={"propertyaddress": address},
+            headers=headers,
+            timeout=REQUEST_TIMEOUT
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            details = data.get("propertyDetails", {})
+            return {
+                "description": details.get("description"),
+                "bedrooms": details.get("resoFacts", {}).get("bedrooms"),
+                "bathrooms": details.get("resoFacts", {}).get("bathroomsFloat"),
+                "sqft": details.get("resoFacts", {}).get("aboveGradeFinishedArea"),
+                "listing_type": details.get("listingTypeDimension"),  # e.g., "Pre-Foreclosure"
+            }
+    except Exception as e:
+        pass
+    return {"description": None, "bedrooms": None, "bathrooms": None, "sqft": None, "listing_type": None}
+
+
 # ── Claude ────────────────────────────────────────────────────────────────────
 
-def _analyze_with_claude(listing: dict, token_totals: dict):
+def _analyze_with_claude(listing: dict, token_totals: dict, description: str = None):
     client = anthropic.Anthropic()
 
     try:
@@ -499,6 +536,10 @@ def _analyze_with_claude(listing: dict, token_totals: dict):
     else:
         lot_str = "unknown"
 
+    # If no description provided, add a note
+    if not description:
+        description = "(No listing description available — use structural data and neighborhood knowledge)"
+
     prompt = CLAUDE_PROMPT_TEMPLATE.format(
         address=listing["address"],
         price=price_str,
@@ -508,6 +549,8 @@ def _analyze_with_claude(listing: dict, token_totals: dict):
         sqft=listing["sqft"] or "?",
         year_built=listing["year_built"] or "unknown",
         lot_size=lot_str,
+        listing_type=listing.get("listing_type", "Unknown"),
+        description=description,
     )
 
     print(f"    → Sending to Claude...")
@@ -686,7 +729,13 @@ def main():
             count_added += 1
             continue
 
-        analysis = _analyze_with_claude(listing, token_totals)
+        # Fetch full property details including description
+        print(f"    → Fetching property description...")
+        prop_details = _fetch_property_description(listing["address"])
+        description = prop_details.get("description")
+        listing["listing_type"] = prop_details.get("listing_type")
+
+        analysis = _analyze_with_claude(listing, token_totals, description=description)
         count_claude += 1
 
         if analysis is None:

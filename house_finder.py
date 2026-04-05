@@ -30,6 +30,7 @@ import re
 import json
 import time
 import sqlite3
+import warnings
 from datetime import datetime, timedelta
 
 import requests
@@ -37,27 +38,25 @@ import gspread
 from google.oauth2.service_account import Credentials
 import anthropic
 
+# Suppress Python 3.9 EOL warnings from google-auth
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.*")
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
 
-# Search area — polygon drawn on geojson.io and pasted here.
-# Coordinates are [lon, lat] from GeoJSON; we convert to "lat lon, ..." for the API.
-# To update: go to geojson.io, draw a new polygon, paste the coordinates array below.
-# Larger Bay Area polygon covering Oakland and Berkeley
-# fmt: off
+# Search area — polygon from geojson.io
+# GeoJSON coordinates are [lon, lat]; convert to "lat lon, lat lon, ..." format for API
 _GEOJSON_COORDS = [  # [longitude, latitude] — GeoJSON order
-    [-122.35, 37.72],  # Southwest: San Leandro
-    [-122.11, 37.72],  # Southeast: Hills
-    [-122.11, 37.91],  # Northeast: El Cerrito/Albany
-    [-122.35, 37.91],  # Northwest: Bay
+    [-122.28107884234528, 37.86430689180793],
+    [-122.2775151935528, 37.843896501632074],
+    [-122.24658191947155, 37.847923592652435],
+    [-122.25216342051922, 37.867467513916694],
+    [-122.28107884234528, 37.86430689180793],  # closes polygon
 ]
-# fmt: on
-# Build the polygon string the API expects: "lat lon, lat lon, ..."
-# Close the polygon by repeating the first point at the end.
+# Build polygon string: "lat lon, lat lon, ..." (note: lat first!)
 SEARCH_POLYGON = ", ".join(f"{lat} {lon}" for lon, lat in _GEOJSON_COORDS)
-SEARCH_POLYGON += f", {_GEOJSON_COORDS[0][1]} {_GEOJSON_COORDS[0][0]}"  # close it
 
 PRICE_MIN         = None   # None = no limit
 PRICE_MAX         = None
@@ -73,7 +72,7 @@ MAX_BEDS       = 8      # proxy for 4+ unit buildings — quads/larger unwanted
 MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement likely)
 
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
-SHEET_TAB      = "FunkDungeons"
+SHEET_TAB      = "House Finder"
 CREDS_FILE     = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "credentials.json")
 DB_FILE        = os.path.join(os.path.dirname(os.path.realpath(__file__)), "house_finder.db")
 
@@ -314,28 +313,18 @@ CREATE TABLE IF NOT EXISTS processed_listings (
     retry_after   TEXT
 )"""
 
-_RETRY_DAYS = {
-    "skipped_prefilter": 60,
-    "skipped_score":     90,
-    "error":              7,
-    # "analyzed" → retry_after = NULL (permanent)
-}
-
-
 def _load_processed_zpids() -> set:
+    """Load all zpids marked as processed (permanent skip)."""
     with sqlite3.connect(DB_FILE) as con:
         con.execute(_CREATE_TABLE)
         rows = con.execute(
-            "SELECT zpid FROM processed_listings "
-            "WHERE retry_after IS NULL OR retry_after > ?",
-            (datetime.now().isoformat(),)
+            "SELECT zpid FROM processed_listings"
         ).fetchall()
     return {r[0] for r in rows}
 
 
 def _save_processed(zpid: str, address: str, price, status: str, score=None) -> None:
-    days = _RETRY_DAYS.get(status)
-    retry_after = (datetime.now() + timedelta(days=days)).date().isoformat() if days else None
+    """Save a processed listing (permanent — all entries marked as never retry)."""
     with sqlite3.connect(DB_FILE) as con:
         con.execute(_CREATE_TABLE)
         con.execute(
@@ -343,7 +332,7 @@ def _save_processed(zpid: str, address: str, price, status: str, score=None) -> 
                (zpid, address, price, status, dungeon_score, processed_at, retry_after)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (str(zpid), address, price, status, score,
-             datetime.now().isoformat(), retry_after)
+             datetime.now().isoformat(), None)  # NULL = permanent skip
         )
 
 
@@ -398,6 +387,8 @@ def _parse_listing(raw: dict):
 
 def _fetch_page(page: int = 1) -> tuple[list, int]:
     """Fetch one page. Returns (parsed_listings, total_pages)."""
+    if page == 1:
+        print(f"  [search] polygon: {SEARCH_POLYGON[:60]}...")
     params = {
         "polygon":       SEARCH_POLYGON,
         "listingStatus": "For_Sale",
@@ -442,6 +433,7 @@ def _fetch_page(page: int = 1) -> tuple[list, int]:
     raw_results = data.get("searchResults", [])
     listings    = [l for l in (_parse_listing(r) for r in raw_results) if l]
     total_pages = int((data.get("pagesInfo") or {}).get("totalPages") or 1)
+
     return listings, total_pages
 
 
@@ -622,10 +614,6 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("=" * 60)
-    print("FunkDungeonFinder")
-    print("=" * 60)
-
     if not RAPIDAPI_KEY:
         print("ERROR: RAPIDAPI_KEY env var not set.")
         print("Run: export RAPIDAPI_KEY=your_key   (or add to ~/.zshrc)")

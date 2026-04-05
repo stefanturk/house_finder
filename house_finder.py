@@ -136,28 +136,26 @@ Listing Description:
 
 The API classifies this as "{home_type}". Use these rules:
 
-RULE 1 — If API says "Single Family", trust it. Output "Single Family".
+RULE 1 — If API says "Single Family", trust it. Output "Single".
 
-RULE 2 — If API says "Multi Family", it IS multi-unit. NEVER output "Single Family".
+RULE 2 — If API says "Multi Family", determine unit count:
   Use beds/baths/sqft to determine how many units:
 
-  Strong signals of Duplex (2 units):
+  Output "Duplex" (2 units) if:
     - Beds 3–6, baths 2–4, sqft 1500–3500
     - Address contains hyphen range (e.g., "123-125 Main St")
     - sqft/beds ratio 400–700 (two side-by-side flats)
 
-  Strong signals of Triplex (3 units):
+  Output "Triplex" (3 units) if:
     - Beds 4–8, baths 3–6, sqft 2500–5000
     - Address range spans 3 addresses (e.g., "2811-2815 Telegraph")
     - sqft/beds ratio 350–600
 
-  Strong signals of Multi Family (4+ units):
-    - Beds ≥ 8, baths ≥ 6
-    - sqft > 4000 on modest lot
-    - Address spans 4+ numbers (e.g., "2811-2821")
+  NEVER output "Multi Family (4+ units)" — we don't want 4+ unit properties.
+  If it looks like 4+ units (Beds ≥ 8, baths ≥ 6, sqft > 5000), cap it at "Triplex" instead.
 
 RULE 3 — Address range is a strong signal:
-  "2811-2815 Telegraph" (4 numbers) = Triplex or larger
+  "2811-2815 Telegraph" (4 numbers) = cap at Triplex
   "1234-1236 Main" (3 numbers) = Duplex or Triplex
   "123-125 Main" (2 numbers) = Duplex
 
@@ -214,8 +212,11 @@ TURNKEY (move-in readiness):
 
 ─── Return EXACTLY this JSON (with property_type filled in) ──────────────────────────
 
+CRITICAL: property_type must be ONLY: "Single" or "Duplex" or "Triplex"
+  (If you think it's 4+ units, output "Triplex" as the max)
+
 {{
-  "property_type":      "Single Family" or "Duplex" or "Triplex" or "Multi Family (4+ units)",
+  "property_type":      "Single" or "Duplex" or "Triplex",
   "dungeon_score":      <1-5>,
   "backyard_score":     <1-5>,
   "lighting_score":     <1-5>,
@@ -288,7 +289,7 @@ def _format_price(price) -> str:
 
 
 _HOME_TYPE_DISPLAY = {
-    "singlefamily": "Single Family",
+    "singlefamily": "Single",
     "multifamily": "Multi Family",
 }
 
@@ -808,6 +809,14 @@ def main():
         if analysis is None:
             count_error += 1
             _save_processed(zpid, address, price, "error")
+            continue
+
+        # Reject 4+ unit properties
+        prop_type = analysis.get("property_type", "")
+        if "4+" in prop_type or "quad" in prop_type.lower() or "multi family (4+" in prop_type.lower():
+            _save_processed(zpid, address, price, "skipped_score", score=1)
+            print(f"    → SKIP: 4+ unit property (not buying), labeled as {prop_type}")
+            count_score_skip += 1
             continue
 
         d = analysis.get("dungeon_score", 0)

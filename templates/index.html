@@ -155,6 +155,119 @@
             border: 1px solid #fff;
         }
 
+        .mode-toggle {
+            display: flex;
+            gap: 4px;
+            padding: 8px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .mode-btn {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #0066cc;
+            background: white;
+            color: #0066cc;
+            border-radius: 3px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .mode-btn.active {
+            background: #0066cc;
+            color: white;
+        }
+
+        .mode-btn:hover {
+            background: #f0f7ff;
+        }
+
+        .mode-btn.active:hover {
+            background: #0052a3;
+        }
+
+        .search-filters {
+            padding: 12px;
+            border-top: 1px solid #ddd;
+            background: white;
+            font-size: 11px;
+        }
+
+        .search-filters-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+
+        .filter-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 4px 0;
+            padding: 2px 0;
+        }
+
+        .filter-label {
+            flex: 1;
+            color: #666;
+        }
+
+        .filter-value {
+            font-weight: 600;
+            color: #333;
+            text-align: right;
+            min-width: 60px;
+        }
+
+        .score-filters {
+            padding: 12px;
+            border-top: 1px solid #ddd;
+            background: white;
+        }
+
+        .score-filters-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+
+        .score-filter-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 6px 0;
+            gap: 6px;
+        }
+
+        .score-filter-label {
+            flex: 1;
+            font-size: 11px;
+            color: #666;
+        }
+
+        .score-filter-input {
+            width: 40px;
+            padding: 3px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            font-size: 11px;
+            text-align: center;
+        }
+
+        .reset-filters {
+            color: #0066cc;
+            cursor: pointer;
+            font-size: 10px;
+            text-decoration: none;
+            margin-top: 4px;
+            display: inline-block;
+        }
+
+        .reset-filters:hover {
+            text-decoration: underline;
+        }
+
         #map {
             flex: 1;
         }
@@ -164,12 +277,55 @@
     <div class="container">
         <!-- Sidebar -->
         <div class="sidebar">
+            <!-- Mode toggle: Buy / Rent -->
+            <div class="mode-toggle">
+                <button class="mode-btn active" id="buyBtn" onclick="setMode('buy')">Buy</button>
+                <button class="mode-btn" id="rentBtn" onclick="setMode('rent')">Rent</button>
+            </div>
+
             <div class="sidebar-header">Polygons</div>
             <div class="polygons-list" id="polygonsList"></div>
-            <button class="run-button" id="runBtn" onclick="runSearch()">Run Search</button>
+            <button class="run-button" id="runBtn" onclick="runSearch()">Run Buy Search</button>
+
+            <!-- Score filters -->
+            <div class="score-filters">
+                <div class="score-filters-title">Filter by Min Score</div>
+                <div class="score-filter-row">
+                    <label class="score-filter-label">Overall:</label>
+                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterOverall" onchange="applyFilters()">
+                </div>
+                <div class="score-filter-row">
+                    <label class="score-filter-label">Dungeon:</label>
+                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterDungeon" onchange="applyFilters()">
+                </div>
+                <div class="score-filter-row">
+                    <label class="score-filter-label">Backyard:</label>
+                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterBackyard" onchange="applyFilters()">
+                </div>
+                <div class="score-filter-row">
+                    <label class="score-filter-label">Lighting:</label>
+                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterLighting" onchange="applyFilters()">
+                </div>
+                <div class="score-filter-row">
+                    <label class="score-filter-label">Hood:</label>
+                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterNeighborhood" onchange="applyFilters()">
+                </div>
+                <div class="score-filter-row">
+                    <label class="score-filter-label">Turnkey:</label>
+                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterTurnkey" onchange="applyFilters()">
+                </div>
+                <a class="reset-filters" onclick="resetFilters()">Reset all</a>
+            </div>
+
+            <!-- Search filters (read-only) -->
+            <div class="search-filters">
+                <div class="search-filters-title">Search Filters</div>
+                <div id="filtersDisplay"></div>
+            </div>
+
             <div class="log-panel" id="logPanel"></div>
             <div class="legend">
-                <div style="font-weight: 600; margin-bottom: 8px;">Listing Scores</div>
+                <div style="font-weight: 600; margin-bottom: 8px;">Buy Listing Scores</div>
                 <div class="legend-item">
                     <div class="legend-dot" style="background: #2ecc71;"></div>
                     <span>Overall ≥ 4</span>
@@ -180,6 +336,19 @@
                 </div>
                 <div class="legend-item">
                     <div class="legend-dot" style="background: #e74c3c;"></div>
+                    <span>Overall < 3</span>
+                </div>
+                <div style="font-weight: 600; margin-top: 8px; margin-bottom: 8px;">Rent Listing Scores</div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: #3498db;"></div>
+                    <span>Overall ≥ 4</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: #5dade2;"></div>
+                    <span>Overall ≥ 3</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: #aed6f1;"></div>
                     <span>Overall < 3</span>
                 </div>
             </div>
@@ -196,6 +365,9 @@
 
     <script>
         let map, drawnItems, polygons = [];
+        let currentMode = "buy";
+        const rentMarkersGroup = new L.FeatureGroup();
+        const buyMarkersGroup = new L.FeatureGroup();
 
         // Initialize map
         map = L.map('map').setView([37.83, -122.27], 12);
@@ -224,11 +396,13 @@
         map.addControl(drawControl);
 
         // Create a feature group for listings markers
-        const listingsMarkers = new L.FeatureGroup();
-        map.addLayer(listingsMarkers);
+        map.addLayer(buyMarkersGroup);
+        map.addLayer(rentMarkersGroup);
+        rentMarkersGroup.clearLayers();
 
-        // Load polygons and listings on startup
+        // Load polygons, filters, and listings on startup
         loadPolygons();
+        loadFilters();
         loadListings();
 
         // Save whenever a polygon is drawn, edited, or deleted
@@ -308,24 +482,33 @@
         }
 
         // Load and render listings as markers
-        function loadListings() {
-            fetch('/listings')
+        function loadListings(mode = currentMode) {
+            const url = `/listings?mode=${mode}`;
+            const markersGroup = mode === "rent" ? rentMarkersGroup : buyMarkersGroup;
+
+            fetch(url)
                 .then(r => {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     return r.json();
                 })
                 .then(data => {
                     if (data.error) {
-                        log('ℹ Listings not available: ' + data.error);
+                        log(`ℹ Listings not available: ${data.error}`);
                         return;
                     }
 
-                    // Clear existing markers
-                    listingsMarkers.clearLayers();
+                    // Clear existing markers for this mode
+                    markersGroup.clearLayers();
 
                     data.forEach(listing => {
                         const score = parseFloat(listing.overall) || 0;
-                        const color = score >= 4 ? '#2ecc71' : score >= 3 ? '#f39c12' : '#e74c3c';
+                        // Different colors for buy vs rent
+                        let color;
+                        if (mode === "rent") {
+                            color = score >= 4 ? '#3498db' : score >= 3 ? '#5dade2' : '#aed6f1';
+                        } else {
+                            color = score >= 4 ? '#2ecc71' : score >= 3 ? '#f39c12' : '#e74c3c';
+                        }
 
                         const marker = L.circleMarker([listing.lat, listing.lng], {
                             radius: 8,
@@ -335,6 +518,16 @@
                             opacity: 1,
                             fillOpacity: 0.85
                         });
+
+                        // Store listing data on marker for filtering
+                        marker.listingData = {
+                            overall: parseFloat(listing.overall) || 0,
+                            dungeon: parseFloat(listing.dungeon) || 0,
+                            backyard: parseFloat(listing.backyard) || 0,
+                            lighting: parseFloat(listing.lighting) || 0,
+                            neighborhood: parseFloat(listing.neighborhood) || 0,
+                            turnkey: parseFloat(listing.turnkey) || 0,
+                        };
 
                         const popupContent = `
                             <b>${listing.address}</b><br>
@@ -350,14 +543,14 @@
                         `;
 
                         marker.bindPopup(popupContent, { maxWidth: 300 });
-                        marker.addTo(listingsMarkers);
+                        marker.addTo(markersGroup);
                     });
 
-                    log('✓ Loaded ' + data.length + ' listing(s) on map');
-                    console.log('Loaded listings:', data);
+                    log(`✓ Loaded ${data.length} ${mode} listing(s) on map`);
+                    applyFilters();
                 })
                 .catch(err => {
-                    log('ℹ Could not load listings: ' + err);
+                    log(`ℹ Could not load listings: ${err}`);
                     console.error('Load listings error:', err);
                 });
         }
@@ -466,6 +659,85 @@
             .catch(err => log('Error: ' + err));
         }
 
+        // Load search filters from server
+        function loadFilters() {
+            fetch('/filters')
+                .then(r => r.json())
+                .then(data => {
+                    const display = document.getElementById('filtersDisplay');
+                    const filterLines = [];
+
+                    if (data.price_min) filterLines.push(`Min Price: $${(data.price_min/1e6).toFixed(1)}M`);
+                    if (data.price_max) filterLines.push(`Max Price: $${(data.price_max/1e6).toFixed(1)}M`);
+                    if (data.min_beds) filterLines.push(`Min Beds: ${data.min_beds}`);
+                    if (data.max_beds) filterLines.push(`Max Beds: ${data.max_beds}`);
+                    if (data.min_baths) filterLines.push(`Min Baths: ${data.min_baths}`);
+                    if (data.max_baths) filterLines.push(`Max Baths: ${data.max_baths}`);
+                    if (data.max_listing_age_days) filterLines.push(`Max Age: ${data.max_listing_age_days}d`);
+
+                    display.innerHTML = filterLines.map(line => `<div class="filter-row"><span class="filter-label">${line.split(':')[0]}</span><span class="filter-value">${line.split(':')[1].trim()}</span></div>`).join('');
+                })
+                .catch(err => console.error('Load filters error:', err));
+        }
+
+        // Switch between buy and rent mode
+        function setMode(mode) {
+            currentMode = mode;
+            document.getElementById('buyBtn').classList.toggle('active', mode === 'buy');
+            document.getElementById('rentBtn').classList.toggle('active', mode === 'rent');
+            document.getElementById('runBtn').textContent = mode === 'rent' ? 'Run Rent Search' : 'Run Buy Search';
+
+            // Show/hide marker groups
+            if (mode === 'rent') {
+                buyMarkersGroup.clearLayers();
+                map.addLayer(rentMarkersGroup);
+            } else {
+                rentMarkersGroup.clearLayers();
+                map.addLayer(buyMarkersGroup);
+            }
+
+            // Load listings for new mode
+            loadListings(mode);
+        }
+
+        // Apply score filters (client-side)
+        function applyFilters() {
+            const filters = {
+                overall: parseFloat(document.getElementById('filterOverall')?.value) || 0,
+                dungeon: parseFloat(document.getElementById('filterDungeon')?.value) || 0,
+                backyard: parseFloat(document.getElementById('filterBackyard')?.value) || 0,
+                lighting: parseFloat(document.getElementById('filterLighting')?.value) || 0,
+                neighborhood: parseFloat(document.getElementById('filterNeighborhood')?.value) || 0,
+                turnkey: parseFloat(document.getElementById('filterTurnkey')?.value) || 0,
+            };
+
+            const markersGroup = currentMode === 'rent' ? rentMarkersGroup : buyMarkersGroup;
+
+            markersGroup.eachLayer(marker => {
+                const data = marker.listingData;
+                const passes = Object.keys(filters).every(key =>
+                    (data[key] || 0) >= filters[key]
+                );
+
+                if (passes) {
+                    markersGroup._map && marker.addTo(markersGroup);
+                } else {
+                    markersGroup.removeLayer(marker);
+                }
+            });
+        }
+
+        // Reset all score filters
+        function resetFilters() {
+            document.getElementById('filterOverall').value = 0;
+            document.getElementById('filterDungeon').value = 0;
+            document.getElementById('filterBackyard').value = 0;
+            document.getElementById('filterLighting').value = 0;
+            document.getElementById('filterNeighborhood').value = 0;
+            document.getElementById('filterTurnkey').value = 0;
+            applyFilters();
+        }
+
         // Run search
         function runSearch() {
             if (polygons.length === 0) {
@@ -478,7 +750,7 @@
             clearLog();
             log('Starting search...');
 
-            const eventSource = new EventSource('/run');
+            const eventSource = new EventSource(`/run?mode=${currentMode}`);
 
             eventSource.onmessage = function(event) {
                 if (event.data === '[done]') {

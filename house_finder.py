@@ -47,6 +47,12 @@ from dotenv import load_dotenv
 # Load environment variables from .env file (if it exists)
 load_dotenv()
 
+# ── Exceptions ────────────────────────────────────────────────────────────────
+
+class QuotaExceededException(Exception):
+    """Raised when RapidAPI quota is exceeded (HTTP 429)."""
+    pass
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -105,7 +111,7 @@ MAX_BATHS         = None   # None = no limit; set to e.g. 4 to filter out larger
 MAX_LISTING_AGE_DAYS = 30  # skip listings on market > this many days (saves API calls)
                            # Increase to 90+ on first run to catch all existing inventory;
                            # set back to 30 for daily use to minimize /pro/byaddress calls
-MIN_DUNGEON_SCORE = 3      # only write to sheet if Claude dungeon_score >= this
+MIN_DUNGEON_SCORE = 0      # 0 = show all houses; user prunes from sheet manually
 MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
 MAX_PER_RUN       = 20     # cap Claude calls per run (set to None for no limit)
 REQUEST_TIMEOUT   = 20
@@ -114,8 +120,12 @@ REQUEST_TIMEOUT   = 20
 MIN_SQFT       = 1000   # skip studios / very small units
 MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement likely)
 
+# ── Listing mode: "For_Sale" or "For_Rent" (change to search rentals) ───────────
+LISTING_STATUS = "For_Sale"   # "For_Sale" or "For_Rent"
+
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
 SHEET_TAB      = "House Finder"
+RENT_SHEET_TAB = "Rent Finder"
 CREDS_FILE     = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "credentials.json")
 DB_FILE        = os.path.join(os.path.dirname(os.path.realpath(__file__)), "house_finder.db")
 
@@ -281,19 +291,23 @@ def _sheets_call(fn, retries=4, delay=5):
                 raise
 
 
-def _get_sheet() -> gspread.Worksheet:
+def _get_sheet(tab_name: str = None) -> gspread.Worksheet:
+    """Get or create a sheet tab. Defaults to SHEET_TAB (buy) or RENT_SHEET_TAB (rent)."""
+    if tab_name is None:
+        tab_name = RENT_SHEET_TAB if LISTING_STATUS == "For_Rent" else SHEET_TAB
+
     creds = Credentials.from_service_account_file(
         CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
     gc = gspread.authorize(creds)
     spreadsheet = gc.open_by_key(SPREADSHEET_ID)
     existing = [ws.title for ws in spreadsheet.worksheets()]
-    if SHEET_TAB not in existing:
-        print(f"  Creating '{SHEET_TAB}' tab...")
-        ws = spreadsheet.add_worksheet(title=SHEET_TAB, rows=1000, cols=len(SHEET_HEADERS) + 2)
+    if tab_name not in existing:
+        print(f"  Creating '{tab_name}' tab...")
+        ws = spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=len(SHEET_HEADERS) + 2)
         _sheets_call(lambda: ws.append_row(SHEET_HEADERS))
     else:
-        ws = spreadsheet.worksheet(SHEET_TAB)
+        ws = spreadsheet.worksheet(tab_name)
     return ws
 
 
@@ -446,7 +460,7 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
         print(f"    [polygon] {polygon[:50]}...")
     params = {
         "polygon":       polygon,
-        "listingStatus": "For_Sale",
+        "listingStatus": LISTING_STATUS,
         "propertyType":  "SingleFamily,MultiFamily",
         "page":          page,
     }
@@ -474,6 +488,9 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
     except requests.exceptions.ConnectionError as e:
         print(f"  [api] Connection error: {e}")
         return [], 0
+
+    if resp.status_code == 429:
+        raise QuotaExceededException(resp.text)
 
     if resp.status_code != 200:
         print(f"  [api] HTTP {resp.status_code}: {resp.text[:200]}")
@@ -770,7 +787,20 @@ def main():
         print(f"  Polygon {poly_idx}/{len(polygons)}...")
         for page in range(1, MAX_PAGES + 1):
             print(f"    Page {page}...", end=" ", flush=True)
-            listings, total_pages = _fetch_page(page, polygon)
+            try:
+                listings, total_pages = _fetch_page(page, polygon)
+            except QuotaExceededException:
+                now = datetime.now()
+                reset = datetime(
+                    now.year + (1 if now.month == 12 else 0),
+                    now.month % 12 + 1,
+                    1
+                )
+                days_left = (reset.date() - now.date()).days
+                print(f"\n  API quota exceeded.")
+                print(f"  Resets ~{reset.strftime('%B 1')} ({days_left} day(s) from now).")
+                print(f"  Tip: set MAX_LISTING_AGE_DAYS = 7 once quota resets.\n")
+                return
             # Deduplicate across polygons (same zpid shouldn't appear twice)
             new_listings = [l for l in listings if l["zpid"] not in seen_zpids_this_run]
             seen_zpids_this_run.update(l["zpid"] for l in new_listings)
@@ -961,4 +991,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # Support --rent flag to search for rentals instead of for-sale listings
+    if "--rent" in sys.argv:
+        LISTING_STATUS = "For_Rent"
     main()

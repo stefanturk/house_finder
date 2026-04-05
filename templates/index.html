@@ -179,42 +179,67 @@
         // Load polygons on startup
         loadPolygons();
 
-        // Save whenever a polygon is drawn or edited
+        // Save whenever a polygon is drawn, edited, or deleted
         map.on('draw:created', function(e) {
             const layer = e.layer;
             drawnItems.addLayer(layer);
+            log('Polygon drawn, saving...');
             savePolygonsFromMap();
         });
 
         map.on('draw:edited', function(e) {
+            log('Polygon edited, saving...');
+            savePolygonsFromMap();
+        });
+
+        map.on('draw:deletedall', function(e) {
+            log('Polygons deleted, saving...');
             savePolygonsFromMap();
         });
 
         map.on('draw:deleted', function(e) {
+            log('Polygon deleted, saving...');
             savePolygonsFromMap();
         });
+
+        // Auto-save every 10 seconds if anything changed
+        setInterval(function() {
+            savePolygonsFromMap();
+        }, 10000);
 
         // Load and render polygons
         function loadPolygons() {
             fetch('/polygons')
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(data => {
                     polygons = data || [];
                     drawnItems.clearLayers();
 
                     // Render existing polygons on map
                     polygons.forEach((coords, idx) => {
-                        const polygon = L.polygon(
-                            coords.map(([lon, lat]) => [lat, lon]),  // Leaflet uses [lat, lon]
-                            { color: '#0066cc' }
-                        );
-                        polygon.polygonIndex = idx;
-                        drawnItems.addLayer(polygon);
+                        try {
+                            const polygon = L.polygon(
+                                coords.map(([lon, lat]) => [lat, lon]),  // Leaflet uses [lat, lon]
+                                { color: '#0066cc' }
+                            );
+                            polygon.polygonIndex = idx;
+                            drawnItems.addLayer(polygon);
+                        } catch (e) {
+                            console.error('Error loading polygon ' + idx + ':', e);
+                        }
                     });
 
                     renderPolygonsList();
+                    log('✓ Loaded ' + polygons.length + ' polygon(s)');
+                    console.log('Loaded polygons:', polygons);
                 })
-                .catch(err => log('Error loading polygons: ' + err));
+                .catch(err => {
+                    log('✗ Error loading polygons: ' + err);
+                    console.error('Load error:', err);
+                });
         }
 
         // Save polygons from drawn items
@@ -228,6 +253,11 @@
                 }
             });
 
+            // Only save if polygons changed
+            if (JSON.stringify(newPolygons) === JSON.stringify(polygons)) {
+                return;  // No changes, skip
+            }
+
             polygons = newPolygons;
 
             fetch('/polygons', {
@@ -235,12 +265,19 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(polygons)
             })
-            .then(r => r.json())
+            .then(r => {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            })
             .then(data => {
                 renderPolygonsList();
-                log('Polygons saved (' + polygons.length + ')');
+                log('✓ Saved ' + polygons.length + ' polygon(s)');
+                console.log('Polygons saved:', polygons);
             })
-            .catch(err => log('Error saving: ' + err));
+            .catch(err => {
+                log('✗ Error saving: ' + err);
+                console.error('Save error:', err);
+            });
         }
 
         // Render list of polygons

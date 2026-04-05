@@ -158,15 +158,24 @@ RULE 3 — Address range is a strong signal:
 ─── Score each dimension 1–5 ────────────────────────────────────────────────────────────
 
 DUNGEON (music studio / bonus space potential):
-  CRITICAL RULE: If description mentions ADU (accessory dwelling unit) → score 1.
-    ADUs are rental units, not studio space for the owner.
-  RULE: If description doesn't mention basement, bonus room, studio, detached garage,
-    or similar music-studio-worthy space → score 1. No guessing.
-  5 = description specifically brags about basement, bonus room, or studio space
-  4 = description mentions potential bonus/garage conversion space or detached structure
-  3 = description hints at extra rooms or old enough house that may have basement (1960s-70s)
-  2 = description provides no evidence but structure might support it (pre-1978, large lot)
-  1 = mentions ADU OR description silent on bonus space OR post-1978 + small lot
+  ⚠️  STRICTLY EVIDENCE-BASED. NO GUESSING.
+
+  If description is empty/missing OR doesn't mention basement/bonus room/studio/detached garage/workshop → MUST SCORE 1.
+
+  CRITICAL RULE: If description mentions ADU → score 1. (ADUs are rental units, not for owner)
+
+  ONLY score 2+ if description explicitly mentions:
+    - "basement" or "finished basement"
+    - "bonus room" or "bonus space"
+    - "studio" or "workshop"
+    - "detached garage" or "separate structure"
+    - similar music-studio-worthy space
+
+  5 = description brags about basement, bonus room, or studio space
+  4 = description mentions bonus room conversion or workshop space
+  3 = description explicitly mentions basement or detached garage
+  2 = description vaguely hints at "extra space" or "storage" but no explicit bonus/music room mention
+  1 = description silent on bonus space, mentions ADU, or no description provided
 
 BACKYARD (outdoor space):
   RULE: If description doesn't mention backyard, yard, patio, deck, or outdoor space → score 1.
@@ -585,6 +594,24 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
 
     try:
         parsed = json.loads(raw)
+
+        # ── Post-processing: Enforce strict dungeon evidence rules ──────────────
+        # If no description or description doesn't mention dungeon features, force score to 1
+        dungeon_keywords = {"basement", "bonus room", "bonus space", "studio", "workshop",
+                           "detached garage", "detached structure", "separate garage", "in-law",
+                           "art room", "creative room", "craft room", "music room",
+                           "rehearsal", "recording", "home studio", "flex room", "den",
+                           "office", "media room", "game room"}
+
+        description_lower = (description or "").lower()
+        has_description = description and "(No listing description available" not in description
+        has_dungeon_mention = any(kw in description_lower for kw in dungeon_keywords)
+
+        if not has_description or (has_description and not has_dungeon_mention):
+            # No description or no mention of dungeon features → force score to 1
+            parsed["dungeon_score"] = 1
+            parsed["reasoning"] = "No dungeon features mentioned in listing description."
+
         # Log the response
         d = parsed.get("dungeon_score", "?")
         b = parsed.get("backyard_score", "?")
@@ -599,6 +626,22 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
         if match:
             try:
                 parsed = json.loads(match.group())
+
+                # ── Post-processing: Enforce strict dungeon evidence rules ──────────────
+                dungeon_keywords = {"basement", "bonus room", "bonus space", "studio", "workshop",
+                                   "detached garage", "detached structure", "separate garage", "in-law",
+                                   "art room", "creative room", "craft room", "music room",
+                                   "rehearsal", "recording", "home studio", "flex room", "den",
+                                   "office", "media room", "game room"}
+
+                description_lower = (description or "").lower()
+                has_description = description and "(No listing description available" not in description
+                has_dungeon_mention = any(kw in description_lower for kw in dungeon_keywords)
+
+                if not has_description or (has_description and not has_dungeon_mention):
+                    parsed["dungeon_score"] = 1
+                    parsed["reasoning"] = "No dungeon features mentioned in listing description."
+
                 d = parsed.get("dungeon_score", "?")
                 b = parsed.get("backyard_score", "?")
                 l = parsed.get("lighting_score", "?")

@@ -123,7 +123,7 @@ def send_email(houses, mode="buy"):
             json={
                 "from": "onboarding@resend.dev",
                 "to": EMAIL_TO,
-                "subject": f"House Finder — {mode_label} Digest ({len(houses)} new listing{'s' if len(houses) != 1 else ''})",
+                "subject": "House Finder Update",
                 "html": html_body,
             },
         )

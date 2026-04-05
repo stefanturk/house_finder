@@ -1,0 +1,30 @@
+{
+  "1070 Aileen St, Oakland, CA": {
+    "lat": 37.8399935,
+    "lng": -122.2814483
+  },
+  "5707 Carberry Ave, Oakland, CA": {
+    "lat": 37.8432971,
+    "lng": -122.2626151
+  },
+  "5812 Dover St, Oakland, CA": {
+    "lat": 37.8435408,
+    "lng": -122.267695
+  },
+  "2045 Emerson St, Berkeley, CA": {
+    "lat": 37.8547085,
+    "lng": -122.2675281
+  },
+  "2243-2245 Ashby Ave, Berkeley, CA": {
+    "lat": 37.8551143,
+    "lng": -122.267907
+  },
+  "6200 Westover Dr, Oakland, CA": {
+    "lat": 37.82854,
+    "lng": -122.198967
+  },
+  "2309 Derby St, Berkeley, CA 94705": {
+    "lat": 37.8612515,
+    "lng": -122.2617905
+  }
+}

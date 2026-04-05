@@ -95,17 +95,19 @@ def _load_polygons() -> list:
         fallback_str = ", ".join(f"{lat} {lon}" for lon, lat in _FALLBACK_COORDS)
         return [fallback_str]
 
-PRICE_MIN         = None   # None = no limit
-PRICE_MAX         = None
+# ── Search filters (adjust these to change what properties are considered) ────────
+PRICE_MIN         = None   # None = no minimum; otherwise in dollars (e.g., 500000)
+PRICE_MAX         = None   # None = no maximum; otherwise in dollars (e.g., 2000000)
 MIN_BEDS          = 2
+MAX_BEDS          = 4      # reject if > 4 beds (Duplex/Triplex max, not 4+ unit buildings)
+MAX_BATHS         = None   # None = no limit; set to e.g. 4 to filter out larger units
 MIN_DUNGEON_SCORE = 3      # only write to sheet if Claude dungeon_score >= this
 MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
 MAX_PER_RUN       = 20     # cap Claude calls per run (set to None for no limit)
 REQUEST_TIMEOUT   = 20
 
-# Hard pre-filters (no Claude cost, aggressively filter unsuitable listings)
+# ── Hard pre-filters (no Claude cost, aggressive unsuitable listings filtering) ───
 MIN_SQFT       = 1000   # skip studios / very small units
-MAX_BEDS       = 8      # proxy for 4+ unit buildings — quads/larger unwanted
 MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement likely)
 
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
@@ -490,6 +492,16 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
 
 def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     """Hard pre-filters — skip if fails any of these checks."""
+    # Check price
+    try:
+        price = int(listing.get("price") or 0)
+        if PRICE_MIN and price < PRICE_MIN:
+            return False, f"price ${price:,} < ${PRICE_MIN:,}"
+        if PRICE_MAX and price > PRICE_MAX:
+            return False, f"price ${price:,} > ${PRICE_MAX:,}"
+    except (ValueError, TypeError):
+        pass
+
     # Reject condos / townhouses — no studio space potential
     home_type = (listing.get("home_type") or "").lower()
     allowed_types = {"singlefamily", "multifamily"}
@@ -503,12 +515,20 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     except (ValueError, TypeError):
         pass
 
-    # Check beds (proxy for unit count)
+    # Check beds (max limit)
     try:
         if listing["bedrooms"] and int(listing["bedrooms"]) > MAX_BEDS:
-            return False, f"beds {listing['bedrooms']} > {MAX_BEDS} (likely 4+ units)"
+            return False, f"beds {listing['bedrooms']} > {MAX_BEDS}"
     except (ValueError, TypeError):
         pass
+
+    # Check baths (max limit)
+    if MAX_BATHS:
+        try:
+            if listing["bathrooms"] and float(listing["bathrooms"]) > MAX_BATHS:
+                return False, f"baths {listing['bathrooms']} > {MAX_BATHS}"
+        except (ValueError, TypeError):
+            pass
 
     # Check age + lot size combo: new construction on small lot = no basement likely
     year = listing["year_built"]
@@ -803,8 +823,8 @@ def main():
             has_range_address = "-" in address and not address.startswith("-")
 
             # Reject Multi Family if: sparse data + range address (can't determine unit count safely)
-            # OR high bed/bath counts suggesting 4+ units
-            if is_multifamily and (has_range_address or beds >= 8 or baths >= 6):
+            # OR bed/bath counts suggesting potential 4+ units
+            if is_multifamily and (has_range_address or beds >= 7 or baths >= 5):
                 _save_processed(zpid, address, price, "skipped_score", score=1)
                 print(f"    → SKIP: Multi Family with insufficient data (can't verify unit count)")
                 count_score_skip += 1
@@ -868,7 +888,7 @@ def main():
             "4+" in prop_type or
             "quad" in prop_type.lower() or
             "multi family (4+" in prop_type.lower() or
-            (is_multifamily_api and (beds >= 8 or baths >= 6 or (has_range_address and beds >= 4)))
+            (is_multifamily_api and (baths >= 5 or (has_range_address and beds >= 3)))
         )
 
         if skip_4plus:

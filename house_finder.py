@@ -37,6 +37,10 @@ import requests
 import gspread
 from google.oauth2.service_account import Credentials
 import anthropic
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (if it exists)
+load_dotenv()
 
 # Suppress Python 3.9 EOL warnings from google-auth
 warnings.filterwarnings("ignore", category=FutureWarning, module="google.*")

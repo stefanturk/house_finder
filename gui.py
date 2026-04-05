@@ -11,6 +11,10 @@ import json
 import subprocess
 import sys
 from flask import Flask, jsonify, request, render_template, Response
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (if it exists)
+load_dotenv()
 
 app = Flask(__name__)
 POLYGONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polygons.json")

@@ -59,6 +59,8 @@ class QuotaExceededException(Exception):
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
+RAPIDAPI_KEY_BACKUP  = os.environ.get("RAPIDAPI_KEY_BACKUP", "")
+RAPIDAPI_HOST_BACKUP = os.environ.get("RAPIDAPI_HOST_BACKUP", "zillow56.p.rapidapi.com")
 
 # Search areas — load from polygons.json (created by GUI)
 # Falls back to hardcoded polygon if file not found
@@ -465,12 +467,42 @@ def _parse_listing(raw: dict):
     }
 
 
+def _normalize_zillow56_result(raw: dict) -> dict:
+    """
+    Adapter: convert Zillow56 search result format to ZLLW Working API format.
+    Zillow56 returns flat fields; ZLLW Working wraps them in a 'property' object.
+    """
+    return {
+        "property": {
+            "zpid": raw.get("zpid"),
+            "address": {
+                "streetAddress": raw.get("streetAddress", ""),
+                "city": raw.get("city", ""),
+                "state": raw.get("state", "CA"),
+            },
+            "price": {"value": raw.get("price")},
+            "bedrooms": raw.get("bedrooms"),
+            "bathrooms": raw.get("bathrooms"),
+            "livingArea": raw.get("livingArea"),
+            "yearBuilt": raw.get("yearBuilt"),
+            "lotSizeWithUnit": {
+                "lotSize": raw.get("lotSize"),
+                "lotSizeUnit": raw.get("lotSizeUnit", "sqft"),
+            } if raw.get("lotSize") else None,
+            "propertyType": raw.get("homeType", ""),
+            "daysOnZillow": raw.get("daysOnZillow"),
+        }
+    }
+
+
 def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
-    """Fetch one page for a given polygon. Returns (parsed_listings, total_pages)."""
+    """Fetch one page for a given polygon. Returns (parsed_listings, total_pages).
+    Retries with backup API on primary failure (except 429 quota)."""
     if not polygon:
         return [], 0
     if page == 1:
         print(f"    [polygon] {polygon[:50]}...")
+
     params = {
         "polygon":       polygon,
         "listingStatus": LISTING_STATUS,
@@ -484,29 +516,44 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
     if MIN_BEDS:
         params["minBeds"] = MIN_BEDS
 
-    headers = {
-        "Content-Type":    "application/json",
-        "x-rapidapi-host": RAPIDAPI_HOST,
-        "x-rapidapi-key":  RAPIDAPI_KEY,
-    }
+    def _attempt(host, key):
+        """Single attempt against a specific API key/host. Returns (status_code, response)."""
+        h = {
+            "Content-Type":    "application/json",
+            "x-rapidapi-host": host,
+            "x-rapidapi-key":  key,
+        }
+        try:
+            r = requests.get(
+                f"https://{host}/search/bypolygon",
+                params=params, headers=h, timeout=REQUEST_TIMEOUT
+            )
+            return r.status_code, r
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            print(f"  [api] Network error on {host}: {e}")
+            return None, None
 
-    try:
-        resp = requests.get(
-            f"https://{RAPIDAPI_HOST}/search/bypolygon",
-            params=params, headers=headers, timeout=REQUEST_TIMEOUT
-        )
-    except requests.exceptions.Timeout:
-        print(f"  [api] Timeout on page {page}")
-        return [], 0
-    except requests.exceptions.ConnectionError as e:
-        print(f"  [api] Connection error: {e}")
-        return [], 0
+    # Try primary API
+    status, resp = _attempt(RAPIDAPI_HOST, RAPIDAPI_KEY)
+    use_adapter = False
 
-    if resp.status_code == 429:
-        raise QuotaExceededException(resp.text)
+    # Retry with backup on failure (but not 429 on primary alone)
+    if status != 200 and RAPIDAPI_KEY_BACKUP:
+        if status == 429:
+            print(f"  [api] Primary quota exceeded (429), trying backup API...")
+        elif status:
+            print(f"  [api] Primary returned {status}, trying backup API...")
+        else:
+            print(f"  [api] Primary network error, trying backup API...")
+        status, resp = _attempt(RAPIDAPI_HOST_BACKUP, RAPIDAPI_KEY_BACKUP)
+        use_adapter = True
 
-    if resp.status_code != 200:
-        print(f"  [api] HTTP {resp.status_code}: {resp.text[:200]}")
+    # If both APIs fail, raise or return empty
+    if status == 429:
+        raise QuotaExceededException(resp.text if resp else "quota exceeded")
+    if status != 200:
+        if status is not None:
+            print(f"  [api] HTTP {status}: {resp.text[:200] if resp else 'no response'}")
         return [], 0
 
     try:
@@ -516,6 +563,13 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
         return [], 0
 
     raw_results = data.get("searchResults", [])
+
+    # If using backup API (Zillow56), normalize results to ZLLW format
+    if use_adapter:
+        if not raw_results:
+            raw_results = data.get("results", data.get("props", []))
+        raw_results = [_normalize_zillow56_result(r) for r in raw_results]
+
     listings    = [l for l in (_parse_listing(r) for r in raw_results) if l]
     total_pages = int((data.get("pagesInfo") or {}).get("totalPages") or 1)
 

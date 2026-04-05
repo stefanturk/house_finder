@@ -100,7 +100,11 @@ PRICE_MIN         = None   # None = no minimum; otherwise in dollars (e.g., 5000
 PRICE_MAX         = None   # None = no maximum; otherwise in dollars (e.g., 2000000)
 MIN_BEDS          = 2
 MAX_BEDS          = 4      # reject if > 4 beds (Duplex/Triplex max, not 4+ unit buildings)
+MIN_BATHS         = None   # None = no minimum; e.g., 1 to skip studios
 MAX_BATHS         = None   # None = no limit; set to e.g. 4 to filter out larger units
+MAX_LISTING_AGE_DAYS = 30  # skip listings on market > this many days (saves API calls)
+                           # Increase to 90+ on first run to catch all existing inventory;
+                           # set back to 30 for daily use to minimize /pro/byaddress calls
 MIN_DUNGEON_SCORE = 3      # only write to sheet if Claude dungeon_score >= this
 MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
 MAX_PER_RUN       = 20     # cap Claude calls per run (set to None for no limit)
@@ -527,6 +531,23 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
         try:
             if listing["bathrooms"] and float(listing["bathrooms"]) > MAX_BATHS:
                 return False, f"baths {listing['bathrooms']} > {MAX_BATHS}"
+        except (ValueError, TypeError):
+            pass
+
+    # Check baths (min limit)
+    if MIN_BATHS:
+        try:
+            if listing["bathrooms"] and float(listing["bathrooms"]) < MIN_BATHS:
+                return False, f"baths {listing['bathrooms']} < {MIN_BATHS}"
+        except (ValueError, TypeError):
+            pass
+
+    # Check listing age (days on market)
+    if MAX_LISTING_AGE_DAYS:
+        try:
+            days = int(listing.get("days_on_zillow") or 0)
+            if days > MAX_LISTING_AGE_DAYS:
+                return False, f"on market {days} days > {MAX_LISTING_AGE_DAYS} day limit"
         except (ValueError, TypeError):
             pass
 

@@ -1,48 +1,54 @@
 #!/usr/bin/env python3
 """
-test_email.py — sends a test email to verify email sending works.
+test_email.py — sends a test email via Resend API.
 
 Setup (one time):
-  1. Enable 2-Step Verification on your Google account (myaccount.google.com → Security)
-  2. Go to: Security → 2-Step Verification → App Passwords
-  3. Select "Mail" and "Other (custom name)" → "House Finder"
-  4. Google generates a 16-character app password (looks like: xxxx xxxx xxxx xxxx)
-  5. Add to .env:
-       GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
-       EMAIL_FROM=your@gmail.com
-       EMAIL_TO=recipient@gmail.com  (can be same as EMAIL_FROM)
+  1. Sign up at https://resend.com (free tier available)
+  2. Create an API key from your dashboard
+  3. Add to .env:
+       RESEND_API_KEY=re_xxxxxxxxxxxxx
 
 Run:
   python3 test_email.py
 """
 
-import smtplib
-import ssl
 import os
-from email.mime.text import MIMEText
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
-EMAIL_TO = os.environ.get("EMAIL_TO", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 
-if not all([GMAIL_APP_PASSWORD, EMAIL_FROM, EMAIL_TO]):
-    print("Error: missing GMAIL_APP_PASSWORD, EMAIL_FROM, or EMAIL_TO in .env")
+if not RESEND_API_KEY:
+    print("Error: missing RESEND_API_KEY in .env")
     print("See setup instructions at top of this file.")
     exit(1)
 
-msg = MIMEText("Hello from House Finder! Email is working. 🎉")
-msg["Subject"] = "House Finder — Test Email"
-msg["From"] = EMAIL_FROM
-msg["To"] = EMAIL_TO
-
 try:
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as s:
-        s.login(EMAIL_FROM, GMAIL_APP_PASSWORD)
-        s.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-    print(f"✓ Email sent to {EMAIL_TO}")
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "from": "onboarding@resend.dev",
+            "to": "stefanturkowski@gmail.com",
+            "subject": "House Finder — Test Email",
+            "html": "<p>Hello from House Finder! Email is working. 🎉</p>",
+        },
+    )
+
+    if response.status_code == 200:
+        data = response.json()
+        print(f"✓ Email sent successfully")
+        print(f"  ID: {data.get('id')}")
+    else:
+        print(f"✗ Error sending email: {response.status_code}")
+        print(f"  {response.text}")
+        exit(1)
+
 except Exception as e:
-    print(f"✗ Error sending email: {e}")
+    print(f"✗ Error: {e}")
     exit(1)

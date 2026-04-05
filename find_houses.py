@@ -59,8 +59,10 @@ class QuotaExceededException(Exception):
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
-RAPIDAPI_KEY_BACKUP  = os.environ.get("RAPIDAPI_KEY_BACKUP", "")
-RAPIDAPI_HOST_BACKUP = os.environ.get("RAPIDAPI_HOST_BACKUP", "zillow56.p.rapidapi.com")
+RAPIDAPI_KEY_BACKUP  = os.environ.get("RAPIDAPI_KEY_BACKUP", "")     # US Property Market — photos + walk scores (no polygon search)
+RAPIDAPI_HOST_BACKUP = "us-property-market1.p.rapidapi.com"
+RAPIDAPI_KEY_BACKUP2  = os.environ.get("RAPIDAPI_KEY_BACKUP2", "")    # private-zillow — backup polygon search + photos + walk scores
+RAPIDAPI_HOST_BACKUP2 = "private-zillow.p.rapidapi.com"
 
 # Search areas — load from polygons.json (created by GUI)
 # Falls back to hardcoded polygon if file not found
@@ -495,6 +497,67 @@ def _normalize_zillow56_result(raw: dict) -> dict:
     }
 
 
+def _fetch_photo(zpid: str) -> str | None:
+    """Fetch the first photo URL for a property via private-zillow. Returns None on failure."""
+    if not RAPIDAPI_KEY_BACKUP2:
+        return None
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "x-rapidapi-host": RAPIDAPI_HOST_BACKUP2,
+            "x-rapidapi-key": RAPIDAPI_KEY_BACKUP2,
+        }
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST_BACKUP2}/propimages",
+            params={"byzpid": zpid},
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        # Try common response formats
+        images = data if isinstance(data, list) else data.get("images", data.get("photos", []))
+        if images:
+            if isinstance(images[0], str):
+                return images[0]
+            elif isinstance(images[0], dict):
+                return images[0].get("url") or images[0].get("src") or images[0].get("href")
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_walk_scores(zpid: str) -> dict | None:
+    """Fetch walk/transit/bike scores via private-zillow. Returns dict or None."""
+    if not RAPIDAPI_KEY_BACKUP2:
+        return None
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "x-rapidapi-host": RAPIDAPI_HOST_BACKUP2,
+            "x-rapidapi-key": RAPIDAPI_KEY_BACKUP2,
+        }
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST_BACKUP2}/walk_transit_bike",
+            params={"byzpid": zpid},
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        # Normalize to {walk, transit, bike} ints
+        return {
+            "walk":    int(data.get("walkScore",    data.get("walk_score",    0))),
+            "transit": int(data.get("transitScore", data.get("transit_score", 0))),
+            "bike":    int(data.get("bikeScore",    data.get("bike_score",    0))),
+        }
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
     """Fetch one page for a given polygon. Returns (parsed_listings, total_pages).
     Retries with backup API on primary failure (except 429 quota)."""
@@ -537,16 +600,22 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
     status, resp = _attempt(RAPIDAPI_HOST, RAPIDAPI_KEY)
     use_adapter = False
 
-    # Retry with backup on failure (but not 429 on primary alone)
-    if status != 200 and RAPIDAPI_KEY_BACKUP:
+    # Retry with BACKUP2 (private-zillow) on failure
+    if status != 200 and RAPIDAPI_KEY_BACKUP2:
         if status == 429:
-            print(f"  [api] Primary quota exceeded (429), trying backup API...")
+            print(f"  [api] Primary quota exceeded (429), trying private-zillow backup...")
         elif status:
-            print(f"  [api] Primary returned {status}, trying backup API...")
+            print(f"  [api] Primary returned {status}, trying private-zillow backup...")
         else:
-            print(f"  [api] Primary network error, trying backup API...")
+            print(f"  [api] Primary network error, trying private-zillow backup...")
+        status, resp = _attempt(RAPIDAPI_HOST_BACKUP2, RAPIDAPI_KEY_BACKUP2)
+        use_adapter = False  # private-zillow uses same /search/bypolygon endpoint, no adapter needed
+
+    # Final fallback to BACKUP (only if manually set to Zillow56, with adapter)
+    if status != 200 and RAPIDAPI_KEY_BACKUP and RAPIDAPI_HOST_BACKUP != "us-property-market1.p.rapidapi.com":
+        print(f"  [api] Backups exhausted, trying final fallback...")
         status, resp = _attempt(RAPIDAPI_HOST_BACKUP, RAPIDAPI_KEY_BACKUP)
-        use_adapter = True
+        use_adapter = True  # only if it's Zillow56
 
     # If both APIs fail, raise or return empty
     if status == 429:
@@ -564,7 +633,7 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
 
     raw_results = data.get("searchResults", [])
 
-    # If using backup API (Zillow56), normalize results to ZLLW format
+    # If using a backup API that needs format normalization (currently not used — Zillow56 adapter is dead code)
     if use_adapter:
         if not raw_results:
             raw_results = data.get("results", data.get("props", []))
@@ -1059,6 +1128,10 @@ def main():
         if d >= MIN_DUNGEON_SCORE:
             # Collect houses with Overall > 3 for email digest
             if overall > 3:
+                # Fetch enrichment data (photos, walk scores) for qualifying houses
+                photo_url = _fetch_photo(str(listing["zpid"]))
+                walk_scores = _fetch_walk_scores(str(listing["zpid"]))
+
                 house_for_email = {
                     "address": listing["address"],
                     "price": _format_price(listing["price"]),
@@ -1075,6 +1148,8 @@ def main():
                     "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
                     "favorite": "FALSE",
                     "date_added": datetime.now().strftime("%Y-%m-%d"),
+                    "photo_url": photo_url,
+                    "walk_scores": walk_scores,
                 }
                 newly_added_houses.append(house_for_email)
 

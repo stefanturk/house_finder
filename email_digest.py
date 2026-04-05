@@ -65,9 +65,22 @@ def build_house_html(house):
     """Build HTML snippet for a single house."""
     favorite = "♥ " if house.get("favorite") == "TRUE" else ""
 
+    # Photo if available
+    photo_html = ""
+    if house.get("photo_url"):
+        photo_html = f'<img src="{house["photo_url"]}" style="width:100%; max-height:220px; object-fit:cover; border-radius:4px; margin-bottom:12px;" alt="Property photo">'
+
+    # Walk/transit/bike scores if available
+    walk_html = ""
+    scores = house.get("walk_scores")
+    if scores:
+        walk_html = f'<div style="font-size:12px; color:#666; margin-bottom:8px;">🚶 Walk: {scores["walk"]} &nbsp; 🚌 Transit: {scores["transit"]} &nbsp; 🚲 Bike: {scores["bike"]}</div>'
+
     return f"""
     <div style="border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; background: #fff;">
         <h3 style="margin: 0 0 8px 0; color: #333;">{favorite}{house.get('address', 'N/A')}</h3>
+        {photo_html}
+        {walk_html}
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; font-size: 14px; color: #666;">
             <div><strong>{house.get('price', 'N/A')}</strong></div>

@@ -212,7 +212,7 @@ def get_listings():
             "lng": coords["lng"],
             "address": address,
             "zillow": record.get("Zillow Link", ""),
-            "price": record.get("Price ($M)", ""),
+            "price": record.get("Price", ""),
             "type": record.get("Home Type", ""),
             "beds": record.get("Beds", ""),
             "baths": record.get("Baths", ""),

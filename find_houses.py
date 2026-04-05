@@ -265,7 +265,7 @@ CRITICAL: property_type must be ONLY: "Single" or "Duplex" or "Triplex"
 SHEET_HEADERS = [
     "Address",            # A
     "Zillow Link",        # B
-    "Price ($M)",         # C
+    "Price",         # C
     "Home Type",          # D
     "Beds",               # E
     "Baths",              # F

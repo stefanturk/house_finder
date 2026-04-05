@@ -228,11 +228,13 @@ BACKYARD (outdoor space):
   1 = description silent on backyard/yard/outdoor space OR mentions none
 
 LIGHTING (natural indoor light):
-  5 = older craftsman / bungalow style — known for large windows
-  4 = pre-1960, likely good natural light
-  3 = 1960s–70s ranch, variable
-  2 = post-1978 or dense urban lot, likely less light
-  1 = very unlikely to have good natural light
+  Score 4–5 ONLY if description explicitly mentions: "large windows", "bright",
+    "sun-drenched", "fantastic lighting", "natural light", "skylights",
+    "open and airy", "floor-to-ceiling windows"
+  Score 1 if description mentions: "dark", "dim", "cave", "no windows", "depressing"
+  Score 2 (default) if description is empty or has no lighting keywords
+  Score 3 if description is generally positive about the home but no lighting keywords
+  Do NOT score based on year built — year alone is unreliable for lighting
 
 NEIGHBORHOOD (desirability / character):
   5 = Rockridge, Temescal, College Ave, Montclair, Piedmont Ave, Elmwood, Claremont
@@ -631,6 +633,32 @@ def _fetch_property_description(address: str) -> dict:
 
 # ── Claude ────────────────────────────────────────────────────────────────────
 
+def _apply_lighting_override(parsed: dict, description: str) -> None:
+    """Apply evidence-based lighting score enforcement (mirrors dungeon override pattern)."""
+    LIGHTING_POSITIVE = {
+        "large windows", "bright", "sun-drenched", "fantastic lighting",
+        "natural light", "skylights", "open and airy", "floor-to-ceiling windows",
+        "sunlit", "sun-filled", "sun-filled", "light-filled", "lots of light",
+        "abundant light", "cheerful", "airy"
+    }
+    LIGHTING_NEGATIVE = {"dark", "dim", "cave", "no windows", "depressing"}
+
+    desc = (description or "").lower()
+    has_desc = description and "(No listing description available" not in description
+    has_pos = any(kw in desc for kw in LIGHTING_POSITIVE)
+    has_neg = any(kw in desc for kw in LIGHTING_NEGATIVE)
+    has_any = has_pos or has_neg
+
+    current = parsed.get("lighting_score", 2)
+
+    if not has_desc or not has_any:
+        parsed["lighting_score"] = min(current, 2)  # cap at 2
+    elif has_pos:
+        parsed["lighting_score"] = max(current, 4)  # floor of 4
+    elif has_neg:
+        parsed["lighting_score"] = 1  # force to 1
+
+
 def _analyze_with_claude(listing: dict, token_totals: dict, description: str = None):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -699,6 +727,9 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
             parsed["dungeon_score"] = 1
             parsed["reasoning"] = "No dungeon features mentioned in listing description."
 
+        # ── Post-processing: Enforce evidence-based lighting rules ────────────────
+        _apply_lighting_override(parsed, description)
+
         # Log the response
         d = parsed.get("dungeon_score", "?")
         b = parsed.get("backyard_score", "?")
@@ -728,6 +759,9 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
                 if not has_description or (has_description and not has_dungeon_mention):
                     parsed["dungeon_score"] = 1
                     parsed["reasoning"] = "No dungeon features mentioned in listing description."
+
+                # ── Post-processing: Enforce evidence-based lighting rules ────────────────
+                _apply_lighting_override(parsed, description)
 
                 d = parsed.get("dungeon_score", "?")
                 b = parsed.get("backyard_score", "?")

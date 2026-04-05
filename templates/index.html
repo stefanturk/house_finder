@@ -340,6 +340,8 @@
         let currentMode = "buy";
         const rentMarkersGroup = new L.FeatureGroup();
         const buyMarkersGroup = new L.FeatureGroup();
+        let allBuyMarkers = [];
+        let allRentMarkers = [];
 
         // Initialize map
         map = L.map('map').setView([37.83, -122.27], 12);
@@ -471,6 +473,8 @@
 
                     // Clear existing markers for this mode
                     markersGroup.clearLayers();
+                    const markersArray = mode === "rent" ? allRentMarkers : allBuyMarkers;
+                    markersArray.length = 0;  // Clear the array
 
                     data.forEach(listing => {
                         const score = parseFloat(listing.overall) || 0;
@@ -508,7 +512,7 @@
                         marker.mode = mode;
                         marker.isFavorite = isFavorite;
 
-                        const favoriteBtn = `<button style="background: ${isFavorite ? '#3498db' : '#ddd'}; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-weight: 600;" onclick="toggleFavorite('${listing.address}', '${mode}', this)">${isFavorite ? '★ Favorited' : '☆ Favorite'}</button>`;
+                        const favoriteBtn = `<button class="fav-btn" style="background: ${isFavorite ? '#3498db' : '#ddd'}; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-weight: 600;" data-address="${listing.address.replace(/"/g, '&quot;')}" data-mode="${mode}">${isFavorite ? '★ Favorited' : '☆ Favorite'}</button>`;
 
                         const popupContent = `
                             <b>${listing.address}</b><br>
@@ -526,6 +530,7 @@
 
                         marker.bindPopup(popupContent, { maxWidth: 300 });
                         marker.addTo(markersGroup);
+                        markersArray.push(marker);
                     });
 
                     log(`✓ Loaded ${data.length} ${mode} listing(s) on map`);
@@ -669,12 +674,14 @@
             document.getElementById('rentBtn').classList.toggle('active', mode === 'rent');
             document.getElementById('runBtn').textContent = mode === 'rent' ? 'Run Rent Search' : 'Run Buy Search';
 
-            // Show/hide marker groups
+            // Remove both groups from map first
+            if (map.hasLayer(buyMarkersGroup)) map.removeLayer(buyMarkersGroup);
+            if (map.hasLayer(rentMarkersGroup)) map.removeLayer(rentMarkersGroup);
+
+            // Add the appropriate group
             if (mode === 'rent') {
-                buyMarkersGroup.clearLayers();
                 map.addLayer(rentMarkersGroup);
             } else {
-                rentMarkersGroup.clearLayers();
                 map.addLayer(buyMarkersGroup);
             }
 
@@ -694,17 +701,20 @@
             };
 
             const markersGroup = currentMode === 'rent' ? rentMarkersGroup : buyMarkersGroup;
+            const markersArray = currentMode === 'rent' ? allRentMarkers : allBuyMarkers;
 
-            markersGroup.eachLayer(marker => {
+            // Clear the group
+            markersGroup.clearLayers();
+
+            // Re-add markers that pass the filter
+            markersArray.forEach(marker => {
                 const data = marker.listingData;
                 const passes = Object.keys(filters).every(key =>
                     (data[key] || 0) >= filters[key]
                 );
 
                 if (passes) {
-                    markersGroup._map && marker.addTo(markersGroup);
-                } else {
-                    markersGroup.removeLayer(marker);
+                    marker.addTo(markersGroup);
                 }
             });
         }
@@ -720,24 +730,30 @@
             applyFilters();
         }
 
-        // Toggle favorite status for a listing
-        function toggleFavorite(address, mode, btn) {
-            fetch('/favorite', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ address, mode })
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.ok) {
-                    const isFav = data.favorite;
-                    btn.textContent = isFav ? '★ Favorited' : '☆ Favorite';
-                    btn.style.background = isFav ? '#3498db' : '#ddd';
-                    log(`${isFav ? '♥' : '♡'} ${address.split(',')[0]}`);
-                }
-            })
-            .catch(err => log('Error updating favorite: ' + err));
-        }
+        // Toggle favorite status for a listing (event delegation)
+        document.addEventListener('click', function(e) {
+            if (e.target.classList.contains('fav-btn')) {
+                const address = e.target.getAttribute('data-address');
+                const mode = e.target.getAttribute('data-mode');
+                const btn = e.target;
+
+                fetch('/favorite', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address, mode })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        const isFav = data.favorite;
+                        btn.textContent = isFav ? '★ Favorited' : '☆ Favorite';
+                        btn.style.background = isFav ? '#3498db' : '#ddd';
+                        log(`${isFav ? '♥' : '♡'} ${address.split(',')[0]}`);
+                    }
+                })
+                .catch(err => log('Error updating favorite: ' + err));
+            }
+        });
 
         // Run search
         function runSearch() {

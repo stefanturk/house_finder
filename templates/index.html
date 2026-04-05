@@ -324,34 +324,6 @@
             </div>
 
             <div class="log-panel" id="logPanel"></div>
-            <div class="legend">
-                <div style="font-weight: 600; margin-bottom: 8px;">Buy Listing Scores</div>
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: #2ecc71;"></div>
-                    <span>Overall ≥ 4</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: #f39c12;"></div>
-                    <span>Overall ≥ 3</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: #e74c3c;"></div>
-                    <span>Overall < 3</span>
-                </div>
-                <div style="font-weight: 600; margin-top: 8px; margin-bottom: 8px;">Rent Listing Scores</div>
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: #3498db;"></div>
-                    <span>Overall ≥ 4</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: #5dade2;"></div>
-                    <span>Overall ≥ 3</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-dot" style="background: #aed6f1;"></div>
-                    <span>Overall < 3</span>
-                </div>
-            </div>
         </div>
 
         <!-- Map -->
@@ -502,10 +474,12 @@
 
                     data.forEach(listing => {
                         const score = parseFloat(listing.overall) || 0;
-                        // Different colors for buy vs rent
+                        const isFavorite = listing.favorite === 'TRUE' || listing.favorite === true;
+
+                        // Favorite = blue, otherwise score-based color
                         let color;
-                        if (mode === "rent") {
-                            color = score >= 4 ? '#3498db' : score >= 3 ? '#5dade2' : '#aed6f1';
+                        if (isFavorite) {
+                            color = '#3498db';  // blue for favorites
                         } else {
                             color = score >= 4 ? '#2ecc71' : score >= 3 ? '#f39c12' : '#e74c3c';
                         }
@@ -519,6 +493,8 @@
                             fillOpacity: 0.85
                         });
 
+                        const isFavorite = listing.favorite === 'TRUE' || listing.favorite === true;
+
                         // Store listing data on marker for filtering
                         marker.listingData = {
                             overall: parseFloat(listing.overall) || 0,
@@ -528,6 +504,11 @@
                             neighborhood: parseFloat(listing.neighborhood) || 0,
                             turnkey: parseFloat(listing.turnkey) || 0,
                         };
+                        marker.address = listing.address;
+                        marker.mode = mode;
+                        marker.isFavorite = isFavorite;
+
+                        const favoriteBtn = `<button style="background: ${isFavorite ? '#3498db' : '#ddd'}; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-weight: 600;" onclick="toggleFavorite('${listing.address}', '${mode}', this)">${isFavorite ? '★ Favorited' : '☆ Favorite'}</button>`;
 
                         const popupContent = `
                             <b>${listing.address}</b><br>
@@ -539,6 +520,7 @@
                             <br>
                             <i>${listing.reasoning}</i><br>
                             <br>
+                            ${favoriteBtn}<br><br>
                             <a href="${listing.zillow}" target="_blank">View on Zillow →</a>
                         `;
 
@@ -736,6 +718,25 @@
             document.getElementById('filterNeighborhood').value = 0;
             document.getElementById('filterTurnkey').value = 0;
             applyFilters();
+        }
+
+        // Toggle favorite status for a listing
+        function toggleFavorite(address, mode, btn) {
+            fetch('/favorite', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ address, mode })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    const isFav = data.favorite;
+                    btn.textContent = isFav ? '★ Favorited' : '☆ Favorite';
+                    btn.style.background = isFav ? '#3498db' : '#ddd';
+                    log(`${isFav ? '♥' : '♡'} ${address.split(',')[0]}`);
+                }
+            })
+            .catch(err => log('Error updating favorite: ' + err));
         }
 
         // Run search

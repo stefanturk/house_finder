@@ -83,6 +83,51 @@ def get_filters():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/favorite", methods=["POST"])
+def toggle_favorite():
+    """Toggle favorite status for a listing in the sheet."""
+    try:
+        data = request.json
+        address = data.get("address", "")
+        mode = data.get("mode", "buy")
+        tab = "Rent Finder" if mode == "rent" else "House Finder"
+
+        creds = Credentials.from_service_account_file(
+            CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        gc = gspread.authorize(creds)
+        ws = gc.open_by_key(SPREADSHEET_ID).worksheet(tab)
+
+        # Find the favorite column (should be last column or labeled "Favorite")
+        all_values = ws.get_all_values()
+        if not all_values:
+            return jsonify({"error": "No data in sheet"}), 400
+
+        headers = all_values[0]
+        favorite_col = None
+        for i, h in enumerate(headers):
+            if "favorite" in h.lower():
+                favorite_col = i + 1  # gspread uses 1-indexed columns
+                break
+
+        if favorite_col is None:
+            return jsonify({"error": "Favorite column not found"}), 400
+
+        # Find row with matching address
+        for row_idx, row in enumerate(all_values[1:], start=2):  # start at row 2 (skip header)
+            if row and row[0] == address:
+                # Get current favorite value
+                current_val = ws.cell(row_idx, favorite_col).value or ""
+                new_val = "FALSE" if current_val.upper() == "TRUE" else "TRUE"
+                ws.update_cell(row_idx, favorite_col, new_val)
+                return jsonify({"ok": True, "favorite": new_val == "TRUE"})
+
+        return jsonify({"error": "Address not found"}), 404
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _load_geocache():
     """Load geocoding cache from file."""
     try:
@@ -166,6 +211,7 @@ def get_listings():
             "neighborhood": record.get("Neighborhood", ""),
             "turnkey": record.get("Turnkey", ""),
             "reasoning": record.get("Reasoning", ""),
+            "favorite": record.get("Favorite", "FALSE"),
         })
 
     if cache_updated:

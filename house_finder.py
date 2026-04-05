@@ -49,6 +49,7 @@ load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
 RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
 
@@ -69,16 +70,26 @@ _FALLBACK_COORDS = [
 def _load_polygons() -> list:
     """
     Load polygon strings from polygons.json (created by GUI).
+    Handles both new format {name, coords} and old format plain arrays.
     Falls back to hardcoded polygon if file not found or invalid.
     Returns list of polygon strings in "lat lon, lat lon, ..." format.
     """
     try:
         with open(POLYGONS_FILE) as f:
-            all_coords = json.load(f)
-        if not all_coords:
+            data = json.load(f)
+        if not data:
             raise ValueError("empty polygons.json")
-        # Convert each polygon from [lon, lat] pairs to "lat lon, ..." string
-        return [", ".join(f"{lat} {lon}" for lon, lat in coords) for coords in all_coords]
+
+        result = []
+        for item in data:
+            # Handle both new format {name, coords} and old format [lon, lat] array
+            coords = item.get("coords") if isinstance(item, dict) else item
+            if coords:
+                result.append(", ".join(f"{lat} {lon}" for lon, lat in coords))
+
+        if result:
+            return result
+        raise ValueError("no valid polygons")
     except Exception:
         # Fallback: return hardcoded polygon
         fallback_str = ", ".join(f"{lat} {lon}" for lon, lat in _FALLBACK_COORDS)
@@ -552,7 +563,7 @@ def _fetch_property_description(address: str) -> dict:
 # ── Claude ────────────────────────────────────────────────────────────────────
 
 def _analyze_with_claude(listing: dict, token_totals: dict, description: str = None):
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     try:
         price_str = f"${int(listing['price']):,}"

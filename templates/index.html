@@ -65,9 +65,19 @@
             border-color: #0066cc;
         }
 
-        .polygon-name {
+        .polygon-name-input {
             flex: 1;
             font-size: 14px;
+            border: none;
+            background: transparent;
+            outline: none;
+            cursor: text;
+            padding: 0;
+            min-width: 0;
+        }
+
+        .polygon-name-input:focus {
+            border-bottom: 1px solid #0066cc;
         }
 
         .polygon-delete {
@@ -123,6 +133,28 @@
             line-height: 1.4;
         }
 
+        .legend {
+            padding: 12px;
+            border-top: 1px solid #ddd;
+            background: white;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 4px 0;
+        }
+
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            border: 1px solid #fff;
+        }
+
         #map {
             flex: 1;
         }
@@ -136,6 +168,21 @@
             <div class="polygons-list" id="polygonsList"></div>
             <button class="run-button" id="runBtn" onclick="runSearch()">Run Search</button>
             <div class="log-panel" id="logPanel"></div>
+            <div class="legend">
+                <div style="font-weight: 600; margin-bottom: 8px;">Listing Scores</div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: #2ecc71;"></div>
+                    <span>Overall ≥ 4</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: #f39c12;"></div>
+                    <span>Overall ≥ 3</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-dot" style="background: #e74c3c;"></div>
+                    <span>Overall < 3</span>
+                </div>
+            </div>
         </div>
 
         <!-- Map -->
@@ -176,12 +223,20 @@
         });
         map.addControl(drawControl);
 
-        // Load polygons on startup
+        // Create a feature group for listings markers
+        const listingsMarkers = new L.FeatureGroup();
+        map.addLayer(listingsMarkers);
+
+        // Load polygons and listings on startup
         loadPolygons();
+        loadListings();
 
         // Save whenever a polygon is drawn, edited, or deleted
         map.on('draw:created', function(e) {
             const layer = e.layer;
+            // Assign default name based on polygon count
+            const count = drawnItems.getLayers().filter(l => l instanceof L.Polygon && !(l instanceof L.Rectangle)).length;
+            layer.polygonName = `Polygon ${count + 1}`;
             drawnItems.addLayer(layer);
             log('Polygon drawn, saving...');
             savePolygonsFromMap();
@@ -215,18 +270,28 @@
                     return r.json();
                 })
                 .then(data => {
-                    polygons = data || [];
+                    // Normalize old format (plain arrays) to {name, coords} objects
+                    const raw = data || [];
+                    polygons = raw.map((item, idx) => {
+                        if (Array.isArray(item)) {
+                            return { name: `Polygon ${idx + 1}`, coords: item };
+                        }
+                        return item;
+                    });
+
                     drawnItems.clearLayers();
 
                     // Render existing polygons on map
-                    polygons.forEach((coords, idx) => {
+                    polygons.forEach((polygon, idx) => {
                         try {
-                            const polygon = L.polygon(
+                            const coords = polygon.coords || polygon;
+                            const layer = L.polygon(
                                 coords.map(([lon, lat]) => [lat, lon]),  // Leaflet uses [lat, lon]
                                 { color: '#0066cc' }
                             );
-                            polygon.polygonIndex = idx;
-                            drawnItems.addLayer(polygon);
+                            layer.polygonIndex = idx;
+                            layer.polygonName = polygon.name || `Polygon ${idx + 1}`;
+                            drawnItems.addLayer(layer);
                         } catch (e) {
                             console.error('Error loading polygon ' + idx + ':', e);
                         }
@@ -242,6 +307,61 @@
                 });
         }
 
+        // Load and render listings as markers
+        function loadListings() {
+            fetch('/listings')
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(data => {
+                    if (data.error) {
+                        log('ℹ Listings not available: ' + data.error);
+                        return;
+                    }
+
+                    // Clear existing markers
+                    listingsMarkers.clearLayers();
+
+                    data.forEach(listing => {
+                        const score = parseFloat(listing.overall) || 0;
+                        const color = score >= 4 ? '#2ecc71' : score >= 3 ? '#f39c12' : '#e74c3c';
+
+                        const marker = L.circleMarker([listing.lat, listing.lng], {
+                            radius: 8,
+                            fillColor: color,
+                            color: '#fff',
+                            weight: 1.5,
+                            opacity: 1,
+                            fillOpacity: 0.85
+                        });
+
+                        const popupContent = `
+                            <b>${listing.address}</b><br>
+                            ${listing.price} &nbsp;|&nbsp; ${listing.type} &nbsp;|&nbsp; ${listing.beds}bd/${listing.baths}ba<br>
+                            <br>
+                            ⭐ Overall: <b>${listing.overall}</b><br>
+                            🏚 Dungeon: ${listing.dungeon} &nbsp; 🌳 Backyard: ${listing.backyard}<br>
+                            💡 Lighting: ${listing.lighting} &nbsp; 🏘 Hood: ${listing.neighborhood} &nbsp; 🔑 Turnkey: ${listing.turnkey}<br>
+                            <br>
+                            <i>${listing.reasoning}</i><br>
+                            <br>
+                            <a href="${listing.zillow}" target="_blank">View on Zillow →</a>
+                        `;
+
+                        marker.bindPopup(popupContent, { maxWidth: 300 });
+                        marker.addTo(listingsMarkers);
+                    });
+
+                    log('✓ Loaded ' + data.length + ' listing(s) on map');
+                    console.log('Loaded listings:', data);
+                })
+                .catch(err => {
+                    log('ℹ Could not load listings: ' + err);
+                    console.error('Load listings error:', err);
+                });
+        }
+
         // Save polygons from drawn items
         function savePolygonsFromMap() {
             const newPolygons = [];
@@ -249,13 +369,16 @@
                 if (layer instanceof L.Polygon && !(layer instanceof L.Rectangle)) {
                     // Convert from Leaflet [lat, lon] to GeoJSON [lon, lat]
                     const coords = layer.getLatLngs()[0].map(ll => [ll.lng, ll.lat]);
-                    newPolygons.push(coords);
+                    const name = layer.polygonName || `Polygon ${newPolygons.length + 1}`;
+                    newPolygons.push({ name, coords });
                 }
             });
 
-            // Only save if polygons changed
-            if (JSON.stringify(newPolygons) === JSON.stringify(polygons)) {
-                return;  // No changes, skip
+            // Only save if coords changed (not names)
+            const newCoordsJson = JSON.stringify(newPolygons.map(p => p.coords));
+            const oldCoordsJson = JSON.stringify(polygons.map(p => p.coords || p));
+            if (newCoordsJson === oldCoordsJson) {
+                return;  // No coord changes, skip
             }
 
             polygons = newPolygons;
@@ -283,12 +406,37 @@
         // Render list of polygons
         function renderPolygonsList() {
             const list = document.getElementById('polygonsList');
-            list.innerHTML = polygons.map((_, idx) => `
-                <div class="polygon-item" onclick="highlightPolygon(${idx})">
-                    <span class="polygon-name">Polygon ${idx + 1}</span>
+            list.innerHTML = polygons.map((poly, idx) => `
+                <div class="polygon-item">
+                    <input class="polygon-name-input"
+                           value="${(poly.name || '').replace(/"/g, '&quot;')}"
+                           onchange="renamePolygon(${idx}, this.value)"
+                           onclick="event.stopPropagation()"
+                    />
                     <button class="polygon-delete" onclick="deletePolygon(${idx}, event)">Delete</button>
                 </div>
             `).join('');
+        }
+
+        // Rename a polygon
+        function renamePolygon(idx, newName) {
+            newName = (newName || '').trim();
+            if (!newName) return;
+
+            polygons[idx].name = newName;
+
+            // Update the layer's name too
+            let layerIdx = 0;
+            drawnItems.eachLayer(layer => {
+                if (layer instanceof L.Polygon && !(layer instanceof L.Rectangle)) {
+                    if (layerIdx === idx) {
+                        layer.polygonName = newName;
+                    }
+                    layerIdx++;
+                }
+            });
+
+            savePolygonsToServer();
         }
 
         // Delete a polygon

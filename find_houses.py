@@ -43,6 +43,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import anthropic
 from dotenv import load_dotenv
+from email_digest import send_email
 
 # Load environment variables from .env file (if it exists)
 load_dotenv()
@@ -128,6 +129,10 @@ MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement li
 
 # ── Listing mode: "For_Sale" or "For_Rent" (change to search rentals) ───────────
 LISTING_STATUS = "For_Sale"   # "For_Sale" or "For_Rent"
+
+# ── Email config ──────────────────────────────────────────────────────────────
+# When False: always attempt to send email (testing). When True: only during automated runs.
+DAILY_RUN_MODE = False
 
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
 SHEET_TAB      = "House Finder"
@@ -836,6 +841,7 @@ def main():
     count_score_skip  = 0
     count_added       = 0
     count_error       = 0
+    newly_added_houses = []  # collect house dicts for email digest
 
     for listing in new_listings:
         # Stop after MAX_PER_RUN Claude calls
@@ -959,9 +965,31 @@ def main():
         l = analysis.get("lighting_score", 0)
         n = analysis.get("neighborhood_score", 0)
         turnkey = analysis.get("turnkey_score", 0)
-        print(f"    Dungeon:{d} Backyard:{b} Light:{l} Hood:{n} Turnkey:{turnkey}")
+        overall = round((d + b + l + n + turnkey) / 5, 1) if any([d, b, l, n, turnkey]) else 0
+        print(f"    Dungeon:{d} Backyard:{b} Light:{l} Hood:{n} Turnkey:{turnkey} Overall:{overall}")
 
         if d >= MIN_DUNGEON_SCORE:
+            # Collect houses with Overall > 3 for email digest
+            if overall > 3:
+                house_for_email = {
+                    "address": listing["address"],
+                    "price": _format_price(listing["price"]),
+                    "type": analysis.get("property_type", listing.get("home_type", "")),
+                    "beds": listing["bedrooms"],
+                    "baths": listing["bathrooms"],
+                    "overall": overall,
+                    "dungeon": d,
+                    "backyard": b,
+                    "lighting": l,
+                    "neighborhood": n,
+                    "turnkey": turnkey,
+                    "reasoning": analysis.get("reasoning", ""),
+                    "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
+                    "favorite": "FALSE",
+                    "date_added": datetime.now().strftime("%Y-%m-%d"),
+                }
+                newly_added_houses.append(house_for_email)
+
             _write_sheet_row(ws, listing, analysis)
             _save_processed(zpid, address, price, "analyzed", score=d)
             print(f"    → ADDED ✓")
@@ -994,6 +1022,14 @@ def main():
         print()
         print(f"  🏴‍☠️  Ahoy! {count_added} dungeon(s) plundered from Ye Olde Zillow, matey!")
     print()
+
+    # ── 9. Email new qualifying houses ────────────────────────────────────────
+    if newly_added_houses:
+        mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+        print(f"Sending email for {len(newly_added_houses)} qualifying house(s)...")
+        send_email(newly_added_houses, mode=mode_str)
+    else:
+        print("No new qualifying houses (Overall > 3). No email sent.")
 
 
 if __name__ == "__main__":

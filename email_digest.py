@@ -26,6 +26,23 @@ SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
 SHEET_TAB = "House Finder"
 CREDS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "credentials.json")
 EMAIL_TO = "stefanturkowski@gmail.com"
+EMAIL_RECIPIENTS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "email_recipients.json")
+
+
+def _load_recipients():
+    """Load email recipients from email_recipients.json. Falls back to hard-coded address."""
+    try:
+        with open(EMAIL_RECIPIENTS_FILE) as f:
+            recipients = json.load(f)
+        if recipients and isinstance(recipients, list):
+            recipients = [r for r in recipients if isinstance(r, str) and r.strip()]
+            if recipients:
+                return recipients
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"  [email] Warning: could not load recipients file: {e}")
+    return [EMAIL_TO]  # hard-coded fallback
 
 
 def get_sheet_data(mode="buy"):
@@ -53,7 +70,7 @@ def build_house_html(house):
         <h3 style="margin: 0 0 8px 0; color: #333;">{favorite}{house.get('address', 'N/A')}</h3>
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; font-size: 14px; color: #666;">
-            <div><strong>${house.get('price', 'N/A')}</strong></div>
+            <div><strong>{house.get('price', 'N/A')}</strong></div>
             <div>{house.get('type', 'N/A')}</div>
             <div>{house.get('beds', '—')} bed / {house.get('baths', '—')} bath</div>
             <div>Added: {house.get('date_added', 'N/A')}</div>
@@ -79,11 +96,18 @@ def build_house_html(house):
     """
 
 
-def send_email(houses, mode="buy"):
+def send_email(houses, mode="buy", recipients=None):
     """Send email with house digest via Resend."""
     if not RESEND_API_KEY:
         print("✗ Error: RESEND_API_KEY not set in .env")
         return False
+
+    if recipients is None:
+        recipients = _load_recipients()
+
+    if not recipients:
+        print("ℹ No email recipients configured — skipping email")
+        return True
 
     if not houses:
         print("ℹ No houses to email")
@@ -122,7 +146,7 @@ def send_email(houses, mode="buy"):
             },
             json={
                 "from": "onboarding@resend.dev",
-                "to": EMAIL_TO,
+                "to": recipients,
                 "subject": "House Finder Update",
                 "html": html_body,
             },
@@ -131,7 +155,7 @@ def send_email(houses, mode="buy"):
         if response.status_code == 200:
             data = response.json()
             print(f"✓ Email sent successfully")
-            print(f"  To: {EMAIL_TO}")
+            print(f"  To: {', '.join(recipients)}")
             print(f"  Houses: {len(houses)}")
             print(f"  ID: {data.get('id')}")
             return True

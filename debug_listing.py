@@ -14,7 +14,7 @@ import sys
 import json
 import requests
 import anthropic
-from house_finder import (
+from find_houses import (
     RAPIDAPI_HOST, RAPIDAPI_KEY, CLAUDE_SYSTEM, CLAUDE_PROMPT_TEMPLATE,
     _lot_to_sqft, _parse_listing, _HOME_TYPE_DISPLAY
 )

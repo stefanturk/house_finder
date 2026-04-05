@@ -66,12 +66,24 @@ def save_polygons():
 
 @app.route("/filters")
 def get_filters():
-    """Return current search filters from house_finder.py."""
+    """Return current search filters from find_houses.py. ?mode=buy or rent (default: buy)."""
     try:
-        import house_finder as hf
+        mode = request.args.get("mode", "buy").lower()
+        import find_houses as hf
+
+        if mode == "rent":
+            price_min = hf.RENT_PRICE_MIN
+            price_max = hf.RENT_PRICE_MAX
+            price_unit = "/mo"
+        else:
+            price_min = hf.PRICE_MIN
+            price_max = hf.PRICE_MAX
+            price_unit = ""
+
         return jsonify({
-            "price_min": hf.PRICE_MIN,
-            "price_max": hf.PRICE_MAX,
+            "price_min": price_min,
+            "price_max": price_max,
+            "price_unit": price_unit,
             "min_beds": hf.MIN_BEDS,
             "max_beds": hf.MAX_BEDS,
             "min_baths": hf.MIN_BATHS,
@@ -222,11 +234,11 @@ def get_listings():
 
 @app.route("/run")
 def run_search():
-    """Stream output from house_finder.py as server-sent events. ?mode=rent or buy (default)."""
+    """Stream output from find_houses.py as server-sent events. ?mode=rent or buy (default)."""
     def stream():
         try:
             mode = request.args.get("mode", "buy").lower()
-            cmd = [sys.executable, "house_finder.py"]
+            cmd = [sys.executable, "find_houses.py"]
             if mode == "rent":
                 cmd.append("--rent")
 

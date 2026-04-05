@@ -653,22 +653,55 @@
         }
 
         // Load search filters from server
-        function loadFilters() {
-            fetch('/filters')
+        function loadFilters(mode = currentMode) {
+            fetch(`/filters?mode=${mode}`)
                 .then(r => r.json())
                 .then(data => {
                     const display = document.getElementById('filtersDisplay');
-                    const filterLines = [];
+                    const rows = [];
 
-                    if (data.price_min) filterLines.push(`Min Price: $${(data.price_min/1e6).toFixed(1)}M`);
-                    if (data.price_max) filterLines.push(`Max Price: $${(data.price_max/1e6).toFixed(1)}M`);
-                    if (data.min_beds) filterLines.push(`Min Beds: ${data.min_beds}`);
-                    if (data.max_beds) filterLines.push(`Max Beds: ${data.max_beds}`);
-                    if (data.min_baths) filterLines.push(`Min Baths: ${data.min_baths}`);
-                    if (data.max_baths) filterLines.push(`Max Baths: ${data.max_baths}`);
-                    if (data.max_listing_age_days) filterLines.push(`Max Age: ${data.max_listing_age_days}d`);
+                    // Price (format based on mode)
+                    let priceMin = data.price_min ? (data.price_min / 1e6).toFixed(1) : '—';
+                    let priceMax = data.price_max ? (data.price_max / 1e6).toFixed(1) : '—';
+                    if (mode === 'rent') {
+                        priceMin = data.price_min ? `$${data.price_min}` : '—';
+                        priceMax = data.price_max ? `$${data.price_max}` : '—';
+                    }
+                    rows.push({
+                        label: 'Price',
+                        value: mode === 'rent' ? `${priceMin} → ${priceMax}/mo` : `$${priceMin}M → $${priceMax}M`
+                    });
 
-                    display.innerHTML = filterLines.map(line => `<div class="filter-row"><span class="filter-label">${line.split(':')[0]}</span><span class="filter-value">${line.split(':')[1].trim()}</span></div>`).join('');
+                    // Beds range
+                    const minBeds = data.min_beds || '—';
+                    const maxBeds = data.max_beds || '—';
+                    rows.push({
+                        label: 'Beds',
+                        value: `${minBeds}→${maxBeds}`
+                    });
+
+                    // Baths range
+                    const minBaths = data.min_baths || '—';
+                    const maxBaths = data.max_baths || '—';
+                    rows.push({
+                        label: 'Baths',
+                        value: `${minBaths}→${maxBaths}`
+                    });
+
+                    // Min Dungeon Score
+                    if (data.min_dungeon_score !== undefined) {
+                        rows.push({
+                            label: 'Min Dungeon',
+                            value: data.min_dungeon_score
+                        });
+                    }
+
+                    display.innerHTML = rows.map(row => `
+                        <div class="filter-row">
+                            <span class="filter-label">${row.label}:</span>
+                            <span class="filter-value">${row.value}</span>
+                        </div>
+                    `).join('');
                 })
                 .catch(err => console.error('Load filters error:', err));
         }
@@ -691,7 +724,8 @@
                 map.addLayer(buyMarkersGroup);
             }
 
-            // Load listings for new mode
+            // Load filters and listings for new mode
+            loadFilters(mode);
             loadListings(mode);
         }
 

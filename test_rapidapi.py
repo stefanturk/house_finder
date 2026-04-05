@@ -2,7 +2,7 @@
 """
 test_rapidapi.py — Block 1 sanity check.
 
-Run this BEFORE house_finder.py to verify:
+Run this BEFORE find_houses.py to verify:
   1. The API key works
   2. The bypolygon endpoint returns Oakland/Berkeley houses
   3. Field names match what the main script expects

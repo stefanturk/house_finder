@@ -102,16 +102,22 @@ def _load_polygons() -> list:
         return [fallback_str]
 
 # ── Search filters (adjust these to change what properties are considered) ────────
-PRICE_MIN         = None   # None = no minimum; otherwise in dollars (e.g., 500000)
-PRICE_MAX         = None   # None = no maximum; otherwise in dollars (e.g., 2000000)
+# Buy mode
+PRICE_MIN         = 500000   # Minimum price in dollars
+PRICE_MAX         = 2000000  # Maximum price in dollars
+
+# Rent mode
+RENT_PRICE_MIN    = 3000   # Minimum rent per month
+RENT_PRICE_MAX    = 6000   # Maximum rent per month
+
 MIN_BEDS          = 2
 MAX_BEDS          = 4      # reject if > 4 beds (Duplex/Triplex max, not 4+ unit buildings)
-MIN_BATHS         = None   # None = no minimum; e.g., 1 to skip studios
-MAX_BATHS         = None   # None = no limit; set to e.g. 4 to filter out larger units
+MIN_BATHS         = 1      # Minimum bathrooms
+MAX_BATHS         = 3      # Maximum bathrooms
 MAX_LISTING_AGE_DAYS = 30  # skip listings on market > this many days (saves API calls)
                            # Increase to 90+ on first run to catch all existing inventory;
                            # set back to 30 for daily use to minimize /pro/byaddress calls
-MIN_DUNGEON_SCORE = 0      # 0 = show all houses; user prunes from sheet manually
+MIN_DUNGEON_SCORE = 2      # minimum dungeon score to add to sheet
 MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
 MAX_PER_RUN       = 20     # cap Claude calls per run (set to None for no limit)
 REQUEST_TIMEOUT   = 20

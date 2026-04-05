@@ -25,7 +25,6 @@
             flex-direction: column;
             background: #f5f5f5;
             border-right: 1px solid #ddd;
-            overflow-y: auto;
         }
 
         .sidebar-header {
@@ -37,9 +36,10 @@
         }
 
         .polygons-list {
-            flex: 1;
+            flex: 3;
             overflow-y: auto;
             padding: 8px;
+            min-height: 0;
         }
 
         .polygon-item {
@@ -117,15 +117,14 @@
         }
 
         .log-panel {
-            padding: 12px;
+            flex: 1;
+            padding: 8px 12px;
             border-top: 1px solid #ddd;
-            background: white;
             font-family: 'Courier New', monospace;
             font-size: 11px;
-            max-height: 200px;
             overflow-y: auto;
-            border-radius: 4px;
             background: #f9f9f9;
+            min-height: 0;
         }
 
         .log-line {
@@ -269,7 +268,14 @@
         }
 
         #map {
-            flex: 1;
+            width: 100%;
+            height: 100%;
+        }
+
+        .filters-panel {
+            flex: 4;
+            overflow-y: auto;
+            min-height: 0;
         }
     </style>
 </head>
@@ -287,47 +293,52 @@
             <div class="polygons-list" id="polygonsList"></div>
             <button class="run-button" id="runBtn" onclick="runSearch()">Run Buy Search</button>
 
-            <!-- Score filters -->
-            <div class="score-filters">
-                <div class="score-filters-title">Filter by Min Score</div>
-                <div class="score-filter-row">
-                    <label class="score-filter-label">Overall:</label>
-                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterOverall" onchange="applyFilters()">
+            <!-- Filters panel (score + search filters combined) -->
+            <div class="filters-panel">
+                <!-- Score filters -->
+                <div class="score-filters">
+                    <div class="score-filters-title">Filter by Min Score</div>
+                    <div class="score-filter-row">
+                        <label class="score-filter-label">Overall:</label>
+                        <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterOverall" onchange="applyFilters()">
+                    </div>
+                    <div class="score-filter-row">
+                        <label class="score-filter-label">Dungeon:</label>
+                        <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterDungeon" onchange="applyFilters()">
+                    </div>
+                    <div class="score-filter-row">
+                        <label class="score-filter-label">Backyard:</label>
+                        <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterBackyard" onchange="applyFilters()">
+                    </div>
+                    <div class="score-filter-row">
+                        <label class="score-filter-label">Lighting:</label>
+                        <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterLighting" onchange="applyFilters()">
+                    </div>
+                    <div class="score-filter-row">
+                        <label class="score-filter-label">Hood:</label>
+                        <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterNeighborhood" onchange="applyFilters()">
+                    </div>
+                    <div class="score-filter-row">
+                        <label class="score-filter-label">Turnkey:</label>
+                        <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterTurnkey" onchange="applyFilters()">
+                    </div>
+                    <a class="reset-filters" onclick="resetFilters()">Reset all</a>
                 </div>
-                <div class="score-filter-row">
-                    <label class="score-filter-label">Dungeon:</label>
-                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterDungeon" onchange="applyFilters()">
-                </div>
-                <div class="score-filter-row">
-                    <label class="score-filter-label">Backyard:</label>
-                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterBackyard" onchange="applyFilters()">
-                </div>
-                <div class="score-filter-row">
-                    <label class="score-filter-label">Lighting:</label>
-                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterLighting" onchange="applyFilters()">
-                </div>
-                <div class="score-filter-row">
-                    <label class="score-filter-label">Hood:</label>
-                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterNeighborhood" onchange="applyFilters()">
-                </div>
-                <div class="score-filter-row">
-                    <label class="score-filter-label">Turnkey:</label>
-                    <input class="score-filter-input" type="number" min="0" max="5" value="0" id="filterTurnkey" onchange="applyFilters()">
-                </div>
-                <a class="reset-filters" onclick="resetFilters()">Reset all</a>
-            </div>
 
-            <!-- Search filters (read-only) -->
-            <div class="search-filters">
-                <div class="search-filters-title">Search Filters</div>
-                <div id="filtersDisplay"></div>
+                <!-- Search filters (read-only) -->
+                <div class="search-filters">
+                    <div class="search-filters-title">Search Filters</div>
+                    <div id="filtersDisplay"></div>
+                </div>
             </div>
 
             <div class="log-panel" id="logPanel"></div>
         </div>
 
-        <!-- Map -->
-        <div id="map"></div>
+        <!-- Map area (with position:relative for overlay positioning) -->
+        <div style="position: relative; flex: 1;">
+            <div id="map"></div>
+        </div>
     </div>
 
     <!-- Leaflet JS -->

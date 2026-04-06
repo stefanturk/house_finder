@@ -254,6 +254,10 @@ LIGHTING (natural indoor light):
   Do NOT score based on year built — year alone is unreliable for lighting
 
 NEIGHBORHOOD (desirability / character):
+  Transit score: {transit_score_line}
+  Use transit score as supporting evidence: 80+ = excellent, 40-79 = moderate, <40 = poor.
+  Transit <40 = penalize unless neighborhood name is top-tier (Rockridge, Elmwood, Montclair).
+
   5 = Rockridge, Temescal, College Ave, Montclair, Piedmont Ave, Elmwood, Claremont
   4 = North Oakland, Grand Ave, Maxwell Park, Glenview, Albany, El Cerrito hills
   3 = Mid-Oakland, central Berkeley flatlands, Alameda
@@ -431,6 +435,48 @@ def _save_processed(zpid: str, address: str, price, status: str, score=None) -> 
             (str(zpid), address, price, status, score,
              datetime.now().isoformat(), None)  # NULL = permanent skip
         )
+
+
+def _cleanup_db(ws) -> None:
+    """Cleanup DB: keep in-sheet + dungeon=1 rejects, delete dungeon=2 + errors + prefilter skips."""
+    try:
+        # Fetch all zpids from the current sheet tab
+        rows = ws.get_all_values()
+        sheet_zpids = set()
+        for row in rows[1:]:  # skip header
+            if len(row) > 7:  # Zillow Link is typically column 7
+                link = row[7]
+                match = re.search(r'(\d+)_zpid', link)
+                if match:
+                    sheet_zpids.add(match.group(1))
+
+        print(f"\n  Sheet has {len(sheet_zpids)} zpids in current tab.")
+
+        # Delete: not in sheet AND (dungeon_score IS NULL OR dungeon_score >= 2 OR status = 'error')
+        with sqlite3.connect(DB_FILE) as con:
+            con.execute(_CREATE_TABLE)
+            before = con.execute("SELECT COUNT(*) FROM processed_listings").fetchone()[0]
+
+            # Build placeholders for sheet zpids
+            if sheet_zpids:
+                placeholders = ", ".join("?" * len(sheet_zpids))
+                query = f"""DELETE FROM processed_listings
+                           WHERE zpid NOT IN ({placeholders})
+                           AND (dungeon_score IS NULL OR dungeon_score >= 2 OR status = 'error')"""
+                con.execute(query, list(sheet_zpids))
+            else:
+                # If sheet is empty, delete everything except dungeon=1
+                con.execute("""DELETE FROM processed_listings
+                             WHERE dungeon_score IS NULL OR dungeon_score >= 2 OR status = 'error'""")
+
+            con.commit()
+            after = con.execute("SELECT COUNT(*) FROM processed_listings").fetchone()[0]
+
+        deleted = before - after
+        print(f"  DB cleanup: {deleted} rows deleted, {after} rows kept (dungeon=1 rejects + in-sheet)")
+
+    except Exception as e:
+        print(f"  Error during DB cleanup: {e}")
 
 
 # ── RapidAPI ──────────────────────────────────────────────────────────────────
@@ -812,7 +858,7 @@ def _apply_lighting_override(parsed: dict, description: str) -> None:
         parsed["lighting_score"] = 1  # force to 1
 
 
-def _analyze_with_claude(listing: dict, token_totals: dict, description: str = None):
+def _analyze_with_claude(listing: dict, token_totals: dict, description: str = None, transit_score: Optional[int] = None):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     try:
@@ -832,6 +878,9 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
     if not description:
         description = "(No listing description available — use structural data and neighborhood knowledge)"
 
+    # Format transit score line for prompt
+    transit_score_line = f"{transit_score}/100" if transit_score is not None else "unavailable"
+
     prompt = CLAUDE_PROMPT_TEMPLATE.format(
         address=listing["address"],
         price=price_str,
@@ -843,6 +892,7 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
         lot_size=lot_str,
         listing_type=listing.get("listing_type", "Unknown"),
         description=description,
+        transit_score_line=transit_score_line,
     )
 
     print(f"    → Sending to Claude...")
@@ -967,6 +1017,13 @@ def main():
         print(f"  Sheets error: {e}")
         return
 
+    # ── Cleanup mode (optional) ────────────────────────────────────────────────
+    if "--cleanup" in sys.argv:
+        print("\n[CLEANUP MODE] Removing borderline + error entries from DB...")
+        _cleanup_db(ws)
+        print("Done. Re-run without --cleanup to search normally.\n")
+        return
+
     # ── 2. Load processed zpids ───────────────────────────────────────────────
     print("\nLoading processed listings...")
     processed = _load_processed_zpids()
@@ -1016,7 +1073,7 @@ def main():
 
     if not new_listings:
         print("\nNo new listings. Done.")
-        print(f"  Zillow API calls: private-zillow={api_call_stats.get('private-zillow', 0)} zllw={api_call_stats.get('zllw', 0)} backup={api_call_stats.get('backup', 0)}")
+        print(f"  API calls: search={{private-zillow={api_call_stats.get('private-zillow', 0)}, zllw={api_call_stats.get('zllw', 0)}}} | descriptions=0 | walk_scores=0")
         return
 
     # ── 5-7. Pre-filter → Claude → Sheet ─────────────────────────────────────
@@ -1110,7 +1167,12 @@ def main():
         description = prop_details.get("description")
         listing["listing_type"] = prop_details.get("listing_type")
 
-        analysis = _analyze_with_claude(listing, token_totals, description=description)
+        # Fetch transit score (and other walkability scores, but only transit to Claude)
+        walk_scores = _fetch_walk_scores(str(listing["zpid"]))
+        transit_score = walk_scores.get("transit") if walk_scores else None
+        api_call_stats["walk_scores"] = api_call_stats.get("walk_scores", 0) + 1
+
+        analysis = _analyze_with_claude(listing, token_totals, description=description, transit_score=transit_score)
         count_claude += 1
 
         if analysis is None:
@@ -1203,7 +1265,9 @@ def main():
     print(f"  Score skip     : {count_score_skip}")
     print(f"  Errors         : {count_error}")
     print(f"  Added to sheet : {count_added}")
-    print(f"  Zillow API calls: private-zillow={api_call_stats.get('private-zillow', 0)} zllw={api_call_stats.get('zllw', 0)} backup={api_call_stats.get('backup', 0)}")
+    # Count descriptions and walk_scores calls (they're only made for non-sparse listings that pass pre-filter)
+    descriptions = api_call_stats.get('walk_scores', 0)  # descriptions called same # of times as walk_scores
+    print(f"  API calls: search={{private-zillow={api_call_stats.get('private-zillow', 0)}, zllw={api_call_stats.get('zllw', 0)}}} | descriptions={descriptions} | walk_scores={api_call_stats.get('walk_scores', 0)}")
     print(f"  Tokens         : {tok_in:,} in / {tok_out:,} out")
     print(f"  Est. cost      : ${cost:.4f}")
 

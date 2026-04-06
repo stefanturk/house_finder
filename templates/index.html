@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>House Search</title>
+    <title>House Finder</title>
 
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
@@ -387,6 +387,35 @@
         .email-add-button:hover {
             background: #0052a3;
         }
+
+        /* New house toast */
+        @keyframes toast-in {
+            0%   { opacity: 0; transform: translateY(-20px); }
+            15%  { opacity: 1; transform: translateY(0); }
+            80%  { opacity: 1; }
+            100% { opacity: 0; }
+        }
+        #new-house-toast {
+            position: absolute;
+            top: 18px; left: 50%; transform: translateX(-50%);
+            background: #2ecc71; color: #fff;
+            padding: 10px 22px; border-radius: 6px;
+            font-size: 15px; font-weight: 700;
+            pointer-events: none; z-index: 1000;
+            animation: toast-in 10s ease forwards;
+        }
+
+        /* Pulsing ring on new markers */
+        @keyframes pulse-ring {
+            0%   { stroke-width: 3; stroke-opacity: 0.9; }
+            50%  { stroke-width: 7; stroke-opacity: 0.3; }
+            100% { stroke-width: 3; stroke-opacity: 0.9; }
+        }
+        .new-ring-pulse {
+            animation: pulse-ring 1.4s ease-in-out infinite;
+            fill: none !important;
+            fill-opacity: 0 !important;
+        }
     </style>
 </head>
 <body>
@@ -477,6 +506,9 @@
         let allBuyMarkers = [];
         let allRentMarkers = [];
         const markersByAddress = {};  // Map address -> { buy: marker, rent: marker }
+        const knownAddressesByMode = {};   // mode -> Set (null on first load for that mode)
+        const newUnseenSet = new Set();    // addresses whose rings haven't been clicked yet
+        const newRingLayers = {};          // address -> ring L.circleMarker
 
         // Initialize map
         map = L.map('map').setView([37.83, -122.27], 12);
@@ -512,7 +544,9 @@
         // Load polygons, filters, and listings on startup
         loadPolygons();
         loadFilters();
-        loadListings();
+        loadListings().then(() => {
+            setInterval(() => loadListings(currentMode), 5000);
+        });
 
         // Save whenever a polygon is drawn, edited, or deleted
         map.on('draw:created', function(e) {
@@ -595,44 +629,39 @@
             const url = `/listings?mode=${mode}`;
             const markersGroup = mode === "rent" ? rentMarkersGroup : buyMarkersGroup;
 
-            fetch(url)
-                .then(r => {
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    return r.json();
-                })
+            return fetch(url)
+                .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
                 .then(data => {
-                    if (data.error) {
-                        log(`ℹ Listings not available: ${data.error}`);
-                        return;
-                    }
+                    if (data.error) { log(`ℹ Listings not available: ${data.error}`); return; }
 
-                    // Clear existing markers for this mode
+                    const incomingAddresses = new Set(data.map(l => l.address));
+
+                    // Detect new addresses (skip on first load for this mode when knownAddressesByMode[mode] is null)
+                    if (knownAddressesByMode[mode] !== null && knownAddressesByMode[mode] !== undefined) {
+                        data.forEach(listing => {
+                            if (!knownAddressesByMode[mode].has(listing.address) && !newUnseenSet.has(listing.address)) {
+                                newUnseenSet.add(listing.address);
+                                showNewHouseToast(listing);
+                            }
+                        });
+                    }
+                    knownAddressesByMode[mode] = incomingAddresses;
+
+                    // Clear existing markers + any stale rings for this mode
                     markersGroup.clearLayers();
                     const markersArray = mode === "rent" ? allRentMarkers : allBuyMarkers;
-                    markersArray.length = 0;  // Clear the array
+                    markersArray.length = 0;
 
                     data.forEach(listing => {
                         const score = parseFloat(listing.overall) || 0;
                         const isFavorite = listing.favorite === 'TRUE' || listing.favorite === true;
-
-                        // Favorite = blue, otherwise score-based color
-                        let color;
-                        if (isFavorite) {
-                            color = '#3498db';  // blue for favorites
-                        } else {
-                            color = score >= 4 ? '#2ecc71' : score >= 3 ? '#f39c12' : '#e74c3c';
-                        }
+                        let color = isFavorite ? '#3498db' : (score >= 4 ? '#2ecc71' : score >= 3 ? '#f39c12' : '#e74c3c');
 
                         const marker = L.circleMarker([listing.lat, listing.lng], {
-                            radius: 8,
-                            fillColor: color,
-                            color: '#fff',
-                            weight: 1.5,
-                            opacity: 1,
-                            fillOpacity: 0.85
+                            radius: 8, fillColor: color, color: '#fff',
+                            weight: 1.5, opacity: 1, fillOpacity: 0.85
                         });
 
-                        // Store listing data on marker for filtering
                         marker.listingData = {
                             overall: parseFloat(listing.overall) || 0,
                             dungeon: parseFloat(listing.dungeon) || 0,
@@ -646,29 +675,43 @@
                         marker.isFavorite = isFavorite;
                         marker.score = score;
 
-                        // Store marker in lookup table by address
-                        if (!markersByAddress[listing.address]) {
-                            markersByAddress[listing.address] = {};
-                        }
+                        if (!markersByAddress[listing.address]) markersByAddress[listing.address] = {};
                         markersByAddress[listing.address][mode] = marker;
+
+                        // Re-add pulsing ring if this address is still unseen
+                        if (newUnseenSet.has(listing.address)) {
+                            const ring = L.circleMarker([listing.lat, listing.lng], {
+                                radius: 14, fillColor: 'transparent', color: color,
+                                weight: 3, className: 'new-ring-pulse'
+                            });
+                            ring.addTo(markersGroup);
+                            newRingLayers[listing.address] = ring;
+                        }
 
                         const favoriteBtn = `<button class="fav-btn" style="background: ${isFavorite ? '#3498db' : '#ddd'}; color: white; border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; font-weight: 600;" data-address="${listing.address.replace(/"/g, '&quot;')}" data-mode="${mode}">${isFavorite ? '★ Favorited' : '☆ Favorite'}</button>`;
 
                         const popupContent = `
                             <b>${listing.address}</b><br>
-                            ${listing.price} &nbsp;|&nbsp; ${listing.type} &nbsp;|&nbsp; ${listing.beds}bd/${listing.baths}ba<br>
-                            <br>
+                            ${listing.price} &nbsp;|&nbsp; ${listing.type} &nbsp;|&nbsp; ${listing.beds}bd/${listing.baths}ba<br><br>
                             ⭐ Overall: <b>${listing.overall}</b><br>
                             🏚 Dungeon: ${listing.dungeon} &nbsp; 🌳 Backyard: ${listing.backyard}<br>
-                            💡 Lighting: ${listing.lighting} &nbsp; 🏘 Hood: ${listing.neighborhood} &nbsp; 🔑 Turnkey: ${listing.turnkey}<br>
-                            <br>
-                            <i>${listing.reasoning}</i><br>
-                            <br>
+                            💡 Lighting: ${listing.lighting} &nbsp; 🏘 Hood: ${listing.neighborhood} &nbsp; 🔑 Turnkey: ${listing.turnkey}<br><br>
+                            <i>${listing.reasoning}</i><br><br>
                             ${favoriteBtn}<br><br>
                             <a href="${listing.zillow}" target="_blank">View on Zillow →</a>
                         `;
 
                         marker.bindPopup(popupContent, { maxWidth: 300 });
+
+                        // Clicking the popup dismisses the pulsing ring
+                        marker.on('click', function() {
+                            if (newUnseenSet.has(listing.address)) {
+                                newUnseenSet.delete(listing.address);
+                                const ring = newRingLayers[listing.address];
+                                if (ring) { markersGroup.removeLayer(ring); delete newRingLayers[listing.address]; }
+                            }
+                        });
+
                         marker.addTo(markersGroup);
                         markersArray.push(marker);
                     });
@@ -676,10 +719,20 @@
                     log(`✓ Loaded ${data.length} ${mode} listing(s) on map`);
                     applyFilters();
                 })
-                .catch(err => {
-                    log(`ℹ Could not load listings: ${err}`);
-                    console.error('Load listings error:', err);
-                });
+                .catch(err => { log(`ℹ Could not load listings: ${err}`); console.error('Load listings error:', err); });
+        }
+
+        // Show toast notification for new house
+        function showNewHouseToast(listing) {
+            const existing = document.getElementById('new-house-toast');
+            if (existing) existing.remove();
+            const toast = document.createElement('div');
+            toast.id = 'new-house-toast';
+            const score = parseFloat(listing.overall) || 0;
+            toast.textContent = `New House! ${listing.address} — ⭐ ${score}`;
+            // Toast must be inside the map's relative container
+            document.querySelector('#map').parentElement.appendChild(toast);
+            setTimeout(() => { if (toast.parentElement) toast.remove(); }, 10000);
         }
 
         // Save polygons from drawn items
@@ -860,7 +913,7 @@
 
             // Load filters and listings for new mode
             loadFilters(mode);
-            loadListings(mode);
+            loadListings(mode).then(() => applyFilters());
         }
 
         // Apply score filters (client-side)

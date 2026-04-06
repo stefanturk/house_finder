@@ -36,7 +36,6 @@ import sys
 import re
 import json
 import time
-import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -147,15 +146,17 @@ MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement li
 # ── Listing mode: "For_Sale" or "For_Rent" (change to search rentals) ───────────
 LISTING_STATUS = "For_Sale"   # "For_Sale" or "For_Rent"
 
+# ── Sheet tabs (renamed from "House Finder" to "Buy Finder") ─────────────────
+SKIPPED_SHEET_TAB = "Skipped Houses"
+
 # ── Email config ──────────────────────────────────────────────────────────────
 # When False: always attempt to send email (testing). When True: only during automated runs.
 DAILY_RUN_MODE = False
 
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
-SHEET_TAB      = "House Finder"
+SHEET_TAB      = "Buy Finder"
 RENT_SHEET_TAB = "Rent Finder"
 CREDS_FILE     = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "credentials.json")
-DB_FILE        = os.path.join(os.path.dirname(os.path.realpath(__file__)), "house_finder.db")
 
 # ── Claude config ─────────────────────────────────────────────────────────────
 
@@ -206,11 +207,16 @@ RULE 2 — If API says "Multi Family", determine unit count:
     - Address range spans 3 addresses (e.g., "2811-2815 Telegraph")
     - sqft/beds ratio 350–600
 
-  NEVER output "Multi Family (4+ units)" — we don't want 4+ unit properties.
-  If it looks like 4+ units (Beds ≥ 8, baths ≥ 6, sqft > 5000), cap it at "Triplex" instead.
+  Output "Quadruplex" (4 units) if:
+    - Beds 6+, baths 4+, sqft 3500+
+    - Address range spans 4 addresses (e.g., "1000-1004 Main St")
+    - Or other strong signals of 4 separate units
+
+  If it looks like 5+ units, still output "Quadruplex" (we reject 4+ anyway).
 
 RULE 3 — Address range is a strong signal:
-  "2811-2815 Telegraph" (4 numbers) = cap at Triplex
+  "1000-1004 Main" (4 numbers) = Quadruplex or higher
+  "2811-2815 Telegraph" (4 numbers) = Triplex or Quadruplex
   "1234-1236 Main" (3 numbers) = Duplex or Triplex
   "123-125 Main" (2 numbers) = Duplex
 
@@ -273,11 +279,11 @@ TURNKEY (move-in readiness):
 
 ─── Return EXACTLY this JSON (with property_type filled in) ──────────────────────────
 
-CRITICAL: property_type must be ONLY: "Single" or "Duplex" or "Triplex"
-  (If you think it's 4+ units, output "Triplex" as the max)
+CRITICAL: property_type must be ONLY: "Single" or "Duplex" or "Triplex" or "Quadruplex"
+  (We reject 4+ unit properties, so Quadruplex is the max we accept)
 
 {{
-  "property_type":      "Single" or "Duplex" or "Triplex",
+  "property_type":      "Single" or "Duplex" or "Triplex" or "Quadruplex",
   "dungeon_score":      <1-5>,
   "backyard_score":     <1-5>,
   "lighting_score":     <1-5>,
@@ -308,7 +314,10 @@ SHEET_HEADERS = [
     "Reasoning",          # O
     "Concerns",           # P
     "Date Found",         # Q
+    "Favorite",           # R
 ]
+
+SKIPPED_HEADERS = SHEET_HEADERS + ["Mode", "Skip Reason"]
 
 
 def _sheets_call(fn, retries=4, delay=5):
@@ -325,8 +334,9 @@ def _sheets_call(fn, retries=4, delay=5):
                 raise
 
 
-def _get_sheet(tab_name: str = None) -> gspread.Worksheet:
-    """Get or create a sheet tab. Defaults to SHEET_TAB (buy) or RENT_SHEET_TAB (rent)."""
+def _get_sheet(tab_name: str = None) -> tuple[gspread.Worksheet, gspread.Spreadsheet]:
+    """Get or create a sheet tab. Defaults to SHEET_TAB (buy) or RENT_SHEET_TAB (rent).
+    Returns (worksheet, spreadsheet) so we can apply data validation."""
     if tab_name is None:
         tab_name = RENT_SHEET_TAB if LISTING_STATUS == "For_Rent" else SHEET_TAB
 
@@ -338,11 +348,33 @@ def _get_sheet(tab_name: str = None) -> gspread.Worksheet:
     existing = [ws.title for ws in spreadsheet.worksheets()]
     if tab_name not in existing:
         print(f"  Creating '{tab_name}' tab...")
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=len(SHEET_HEADERS) + 2)
+        ws = spreadsheet.add_worksheet(title=tab_name, rows=1000, cols=len(SHEET_HEADERS))
         _sheets_call(lambda: ws.append_row(SHEET_HEADERS))
+
+        # Add checkbox data validation to Favorite column (last column)
+        fav_col_idx = len(SHEET_HEADERS) - 1  # 0-indexed
+        try:
+            spreadsheet.batch_update({"requests": [{
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 1000,
+                        "startColumnIndex": fav_col_idx,
+                        "endColumnIndex": fav_col_idx + 1
+                    },
+                    "rule": {
+                        "condition": {"type": "BOOLEAN"},
+                        "strict": True,
+                        "showCustomUi": True
+                    }
+                }
+            }]})
+        except Exception as e:
+            print(f"  Warning: Could not set checkbox validation: {e}")
     else:
         ws = spreadsheet.worksheet(tab_name)
-    return ws
+    return ws, spreadsheet
 
 
 def _format_price(price) -> str:
@@ -397,86 +429,124 @@ def _write_sheet_row(ws: gspread.Worksheet, listing: dict, analysis: dict) -> No
         analysis.get("reasoning", ""),                              # O
         analysis.get("concerns") or "",                             # P
         datetime.now().strftime("%Y-%m-%d %H:%M"),                  # Q
+        "FALSE",                                                     # R (Favorite)
     ]
     _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
 
 
-# ── SQLite deduplication ──────────────────────────────────────────────────────
+# ── Sheet-based deduplication (replaces SQLite) ───────────────────────────────
 
-_CREATE_TABLE = """
-CREATE TABLE IF NOT EXISTS processed_listings (
-    zpid          TEXT PRIMARY KEY,
-    address       TEXT,
-    price         INTEGER,
-    status        TEXT NOT NULL,
-    dungeon_score REAL,
-    processed_at  TEXT NOT NULL,
-    retry_after   TEXT
-)"""
-
-def _load_processed_zpids() -> set:
-    """Load all zpids marked as processed (permanent skip)."""
-    with sqlite3.connect(DB_FILE) as con:
-        con.execute(_CREATE_TABLE)
-        rows = con.execute(
-            "SELECT zpid FROM processed_listings"
-        ).fetchall()
-    return {r[0] for r in rows}
-
-
-def _save_processed(zpid: str, address: str, price, status: str, score=None) -> None:
-    """Save a processed listing (permanent — all entries marked as never retry)."""
-    with sqlite3.connect(DB_FILE) as con:
-        con.execute(_CREATE_TABLE)
-        con.execute(
-            """INSERT OR REPLACE INTO processed_listings
-               (zpid, address, price, status, dungeon_score, processed_at, retry_after)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (str(zpid), address, price, status, score,
-             datetime.now().isoformat(), None)  # NULL = permanent skip
-        )
+def _load_processed_zpids_from_sheets(ws_active: gspread.Worksheet, ws_skipped: gspread.Worksheet) -> set:
+    """Load all zpids from both the active tab (Buy/Rent Finder) and Skipped tab.
+    Returns union of zpids — these are already processed and should be skipped."""
+    zpids = set()
+    for ws in [ws_active, ws_skipped]:
+        if ws is None:
+            continue
+        try:
+            rows = ws.get_all_values()
+            for row in rows[1:]:  # skip header
+                if row and len(row) > 1:  # Check row exists and has at least 2 columns
+                    # Zillow Link is column B (index 1), format: "https://www.zillow.com/homedetails/ZPID_zpid/"
+                    link = row[1]
+                    match = re.search(r'(\d+)_zpid', link)
+                    if match:
+                        zpids.add(match.group(1))
+        except Exception:
+            pass
+    return zpids
 
 
-def _cleanup_db(ws) -> None:
-    """Cleanup DB: keep in-sheet + dungeon=1 rejects, delete dungeon=2 + errors + prefilter skips."""
-    try:
-        # Fetch all zpids from the current sheet tab
-        rows = ws.get_all_values()
-        sheet_zpids = set()
-        for row in rows[1:]:  # skip header
-            if len(row) > 7:  # Zillow Link is typically column 7
-                link = row[7]
-                match = re.search(r'(\d+)_zpid', link)
-                if match:
-                    sheet_zpids.add(match.group(1))
+def _get_skipped_sheet() -> tuple[gspread.Worksheet, gspread.Spreadsheet]:
+    """Get or create the Skipped Houses tab (shared across buy and rent runs).
+    Returns (worksheet, spreadsheet)."""
+    creds = Credentials.from_service_account_file(
+        CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    gc = gspread.authorize(creds)
+    spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+    existing = [ws.title for ws in spreadsheet.worksheets()]
 
-        print(f"\n  Sheet has {len(sheet_zpids)} zpids in current tab.")
+    if SKIPPED_SHEET_TAB not in existing:
+        print(f"  Creating '{SKIPPED_SHEET_TAB}' tab...")
+        ws = spreadsheet.add_worksheet(title=SKIPPED_SHEET_TAB, rows=2000, cols=len(SKIPPED_HEADERS))
+        _sheets_call(lambda: ws.append_row(SKIPPED_HEADERS))
 
-        # Delete: not in sheet AND (dungeon_score IS NULL OR dungeon_score >= 2 OR status = 'error')
-        with sqlite3.connect(DB_FILE) as con:
-            con.execute(_CREATE_TABLE)
-            before = con.execute("SELECT COUNT(*) FROM processed_listings").fetchone()[0]
+        # Add checkbox data validation to Favorite column (same index as main tab)
+        fav_col_idx = len(SHEET_HEADERS) - 1  # "Favorite" is at this index in SKIPPED_HEADERS too
+        try:
+            spreadsheet.batch_update({"requests": [{
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 2000,
+                        "startColumnIndex": fav_col_idx,
+                        "endColumnIndex": fav_col_idx + 1
+                    },
+                    "rule": {
+                        "condition": {"type": "BOOLEAN"},
+                        "strict": True,
+                        "showCustomUi": True
+                    }
+                }
+            }]})
+        except Exception as e:
+            print(f"  Warning: Could not set checkbox validation on Skipped tab: {e}")
+    else:
+        ws = spreadsheet.worksheet(SKIPPED_SHEET_TAB)
+    return ws, spreadsheet
 
-            # Build placeholders for sheet zpids
-            if sheet_zpids:
-                placeholders = ", ".join("?" * len(sheet_zpids))
-                query = f"""DELETE FROM processed_listings
-                           WHERE zpid NOT IN ({placeholders})
-                           AND (dungeon_score IS NULL OR dungeon_score >= 2 OR status = 'error')"""
-                con.execute(query, list(sheet_zpids))
-            else:
-                # If sheet is empty, delete everything except dungeon=1
-                con.execute("""DELETE FROM processed_listings
-                             WHERE dungeon_score IS NULL OR dungeon_score >= 2 OR status = 'error'""")
 
-            con.commit()
-            after = con.execute("SELECT COUNT(*) FROM processed_listings").fetchone()[0]
+def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mode_str: str, skip_reason: str) -> None:
+    """Write a skipped listing row to the Skipped Houses tab.
+    Includes available scores if analysis exists, empty otherwise."""
+    zpid = listing["zpid"]
+    lot_sqft = listing["lot_sqft"]
+    lot_str = f"{lot_sqft:,.0f}" if lot_sqft else ""
 
-        deleted = before - after
-        print(f"  DB cleanup: {deleted} rows deleted, {after} rows kept (dungeon=1 rejects + in-sheet)")
+    # Scores: include if analysis exists, else empty
+    d = analysis.get("dungeon_score", "") if analysis else ""
+    b = analysis.get("backyard_score", "") if analysis else ""
+    l = analysis.get("lighting_score", "") if analysis else ""
+    n = analysis.get("neighborhood_score", "") if analysis else ""
+    t = analysis.get("turnkey_score", "") if analysis else ""
 
-    except Exception as e:
-        print(f"  Error during DB cleanup: {e}")
+    # Overall: only calculate if scores exist
+    if analysis and any([d, b, l, n, t]):
+        overall = round((d + b + l + n + t) / 5, 1) if all([d, b, l, n, t]) else ""
+    else:
+        overall = ""
+
+    # Map home type
+    home_type_display = _HOME_TYPE_DISPLAY.get(
+        (listing["home_type"] or "").lower(), listing["home_type"]
+    )
+    property_type = analysis.get("property_type", home_type_display) if analysis else home_type_display
+
+    row = [
+        listing["address"],                                          # A
+        f"https://www.zillow.com/homedetails/{zpid}_zpid/",         # B
+        _format_price(listing["price"]),                            # C
+        property_type,                                               # D
+        listing["bedrooms"],                                         # E
+        listing["bathrooms"],                                        # F
+        overall,                                                     # G
+        d,                                                           # H
+        b,                                                           # I
+        l,                                                           # J
+        n,                                                           # K
+        t,                                                           # L
+        listing["sqft"],                                             # M
+        lot_str,                                                     # N
+        analysis.get("reasoning", "") if analysis else "",          # O
+        analysis.get("concerns", "") if analysis else "",           # P
+        datetime.now().strftime("%Y-%m-%d %H:%M"),                  # Q
+        "FALSE",                                                     # R (Favorite)
+        mode_str,                                                    # S (Mode)
+        skip_reason,                                                 # T (Skip Reason)
+    ]
+    _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
 
 
 # ── RapidAPI ──────────────────────────────────────────────────────────────────
@@ -524,6 +594,7 @@ def _parse_listing(raw: dict):
         "lot_sqft":   _lot_to_sqft(prop.get("lotSizeWithUnit")),
         "home_type":  prop.get("propertyType", ""),
         "days_on_zillow": prop.get("daysOnZillow", ""),
+        "status_type": prop.get("homeStatus") or prop.get("statusType") or prop.get("listingSubStatus") or "",
         "listing_type": None,  # Will be filled in by _fetch_property_description
     }
 
@@ -735,8 +806,13 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     except (ValueError, TypeError):
         pass
 
-    # Reject condos / townhouses — no studio space potential
+    # Reject condos / townhouses / apartments — explicit blocklist for types that slip through
     home_type = (listing.get("home_type") or "").lower()
+    rejected_types = {"condo", "apartment", "townhouse", "manufactured"}
+    if any(t in home_type for t in rejected_types):
+        return False, f"property type '{listing['home_type']}' is condo/apartment/townhouse"
+
+    # Also check allowlist (SingleFamily/MultiFamily)
     allowed_types = {"singlefamily", "multifamily"}
     if home_type and not any(t in home_type for t in allowed_types):
         return False, f"property type '{listing['home_type']}' not singleFamily/multiFamily"
@@ -801,8 +877,12 @@ def _is_sparse(listing: dict) -> bool:
 
 # ── Property Details (descriptions) ───────────────────────────────────────────
 
-def _fetch_property_description(address: str) -> dict:
-    """Fetch full property details from US Property Market /property endpoint (600 calls/month quota)."""
+def _fetch_property_description(address: str, zpid: str = None) -> dict:
+    """Fetch full property details from US Property Market /property endpoint (600 calls/month quota).
+    Falls back to web scraping via zillow_scraper if API returns no description."""
+    description = None
+    listing_type = None
+
     try:
         headers = {
             "Content-Type": "application/json",
@@ -817,17 +897,27 @@ def _fetch_property_description(address: str) -> dict:
         )
         if resp.status_code == 200:
             data = resp.json()
-            # US Property Market returns description in topLevelDescription or uses None
-            return {
-                "description": data.get("topLevelDescription") or data.get("description"),
-                "bedrooms": data.get("bedrooms"),
-                "bathrooms": data.get("bathrooms"),
-                "sqft": data.get("sqft"),
-                "listing_type": data.get("listingType"),
-            }
-    except Exception as e:
+            description = data.get("topLevelDescription") or data.get("description")
+            listing_type = data.get("listingType")
+    except Exception:
         pass
-    return {"description": None, "bedrooms": None, "bathrooms": None, "sqft": None, "listing_type": None}
+
+    # Fallback: web scrape if API returned nothing and we have a zpid
+    if not description and zpid:
+        try:
+            from zillow_scraper import scrape_listing
+            scraped = scrape_listing(str(zpid))
+            description = scraped.get("description")
+        except Exception:
+            pass
+
+    return {
+        "description": description,
+        "bedrooms": None,
+        "bathrooms": None,
+        "sqft": None,
+        "listing_type": listing_type,
+    }
 
 
 # ── Claude ────────────────────────────────────────────────────────────────────
@@ -1011,27 +1101,17 @@ def main():
     # ── 1. Connect Sheets ─────────────────────────────────────────────────────
     print("\nConnecting to Google Sheets...")
     try:
-        ws = _get_sheet()
-        print(f"  Connected to '{SHEET_TAB}'.")
+        ws, spreadsheet = _get_sheet()
+        ws_skipped, _ = _get_skipped_sheet()
+        print(f"  Connected to '{SHEET_TAB}' and '{SKIPPED_SHEET_TAB}'.")
     except Exception as e:
         print(f"  Sheets error: {e}")
         return
 
-    # ── Cleanup mode (optional) ────────────────────────────────────────────────
-    if "--cleanup" in sys.argv:
-        print("\n[CLEANUP MODE] Removing borderline + error entries from DB...")
-        _cleanup_db(ws)
-        print("Done. Re-run without --cleanup to search normally.\n")
-        return
-
-    # ── 2. Load processed zpids ───────────────────────────────────────────────
+    # ── 2. Load processed zpids from both active and skipped tabs ──────────────
     print("\nLoading processed listings...")
-    processed = _load_processed_zpids()
-    with sqlite3.connect(DB_FILE) as con:
-        con.execute(_CREATE_TABLE)
-        total_db       = con.execute("SELECT COUNT(*) FROM processed_listings").fetchone()[0]
-        retry_eligible = total_db - len(processed)
-    print(f"  {total_db} tracked ({len(processed)} active skips, {retry_eligible} retry-eligible)")
+    processed = _load_processed_zpids_from_sheets(ws, ws_skipped)
+    print(f"  {len(processed)} already processed (across both tabs)")
 
     # ── 3. Fetch listings ─────────────────────────────────────────────────────
     polygons = _load_polygons()
@@ -1110,7 +1190,8 @@ def main():
         if not passes:
             print(f"    → SKIP: {skip_reason}")
             count_prefiltered += 1
-            _save_processed(zpid, address, price, "skipped_prefilter")
+            mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+            _write_skipped_row(ws_skipped, listing, None, mode_str, skip_reason)
             continue
 
         # Handle sparse listings (foreclosures/pre-foreclosures with minimal data)
@@ -1134,12 +1215,21 @@ def main():
             # Reject Multi Family if: sparse data + range address (can't determine unit count safely)
             # OR bed/bath counts suggesting potential 4+ units
             if is_multifamily and (has_range_address or beds >= 7 or baths >= 5):
-                _save_processed(zpid, address, price, "skipped_score", score=1)
+                mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+                _write_skipped_row(ws_skipped, listing, None, mode_str, "Multi Family sparse — can't verify unit count")
                 print(f"    → SKIP: Multi Family with insufficient data (can't verify unit count)")
                 count_score_skip += 1
                 continue
 
-            print(f"    → SPARSE: insufficient data (foreclosure/pre-foreclosure)")
+            print(f"    → SPARSE: insufficient data")
+
+            # Derive label based on status_type
+            status_type_lower = (listing.get("status_type") or "").lower()
+            if any(x in status_type_lower for x in ("foreclosure", "auction", "pre_foreclosure")):
+                sparse_label = "Foreclosure/pre-foreclosure — insufficient data to score"
+            else:
+                sparse_label = "Sparse data — listing has minimal fields, unable to score"
+
             # Build synthetic analysis with all 1s
             home_type_display = _HOME_TYPE_DISPLAY.get(
                 (listing["home_type"] or "").lower(), listing["home_type"]
@@ -1151,19 +1241,19 @@ def main():
                 "lighting_score": 1,
                 "neighborhood_score": 1,
                 "turnkey_score": 1,
-                "reasoning": "Foreclosure/pre-foreclosure — insufficient data to score",
+                "reasoning": sparse_label,
                 "concerns": None,
             }
-            _write_sheet_row(ws, listing, analysis)
-            _save_processed(zpid, address, price, "analyzed", score=1)
-            print(f"    → ADDED ✓")
+            # Sparse listings (all 1s) go to Skipped Houses only, not main sheet
+            mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+            _write_skipped_row(ws_skipped, listing, analysis, mode_str, sparse_label)
+            print(f"    → SKIP (sparse): {sparse_label}")
             count_sparse += 1
-            count_added += 1
             continue
 
-        # Fetch full property details including description
+        # Fetch full property details including description (with fallback to web scraping)
         print(f"    → Fetching property description...")
-        prop_details = _fetch_property_description(listing["address"])
+        prop_details = _fetch_property_description(listing["address"], listing["zpid"])
         description = prop_details.get("description")
         listing["listing_type"] = prop_details.get("listing_type")
 
@@ -1177,7 +1267,8 @@ def main():
 
         if analysis is None:
             count_error += 1
-            _save_processed(zpid, address, price, "error")
+            mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+            _write_skipped_row(ws_skipped, listing, None, mode_str, "Claude API error")
             continue
 
         # Reject 4+ unit properties — check both Claude's output and API data
@@ -1206,7 +1297,8 @@ def main():
         )
 
         if skip_4plus:
-            _save_processed(zpid, address, price, "skipped_score", score=1)
+            mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+            _write_skipped_row(ws_skipped, listing, analysis, mode_str, f"4+ unit property ({prop_type})")
             print(f"    → SKIP: 4+ unit property (API: {home_type_api}, beds: {beds}, baths: {baths})")
             count_score_skip += 1
             continue
@@ -1242,11 +1334,11 @@ def main():
                 newly_added_houses.append(house_for_email)
 
             _write_sheet_row(ws, listing, analysis)
-            _save_processed(zpid, address, price, "analyzed", score=d)
             print(f"    → ADDED ✓")
             count_added += 1
         else:
-            _save_processed(zpid, address, price, "skipped_score", score=d)
+            mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+            _write_skipped_row(ws_skipped, listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
             print(f"    → SKIP: dungeon {d} < {MIN_DUNGEON_SCORE}")
             count_score_skip += 1
 

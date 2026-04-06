@@ -16,6 +16,7 @@ import os
 import json
 import subprocess
 import sys
+import time
 from flask import Flask, jsonify, request, render_template, Response
 from dotenv import load_dotenv
 import gspread
@@ -32,8 +33,12 @@ GEOCODE_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "g
 EMAIL_RECIPIENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_recipients.json")
 CREDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "credentials.json")
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
-SHEET_TAB = "House Finder"
+SHEET_TAB = "Buy Finder"
 RENT_SHEET_TAB = "Rent Finder"
+
+# In-memory cache for listings (to avoid hammering Sheets on every poll)
+_listings_cache: dict = {}  # mode -> {"data": [...], "ts": float}
+_LISTINGS_CACHE_TTL = 10  # seconds
 
 
 @app.route("/")
@@ -132,7 +137,7 @@ def toggle_favorite():
         data = request.json
         address = data.get("address", "")
         mode = data.get("mode", "buy")
-        tab = "Rent Finder" if mode == "rent" else "House Finder"
+        tab = "Rent Finder" if mode == "rent" else "Buy Finder"
 
         creds = Credentials.from_service_account_file(
             CREDS_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"]
@@ -188,8 +193,14 @@ def _save_geocache(cache):
 @app.route("/listings")
 def get_listings():
     """Fetch listings from Google Sheet and geocode addresses. ?mode=rent or buy (default)."""
+    mode = request.args.get("mode", "buy").lower()
+
+    # Check cache first
+    cached = _listings_cache.get(mode)
+    if cached and (time.time() - cached["ts"]) < _LISTINGS_CACHE_TTL:
+        return jsonify(cached["data"])
+
     try:
-        mode = request.args.get("mode", "buy").lower()
         tab = RENT_SHEET_TAB if mode == "rent" else SHEET_TAB
 
         creds = Credentials.from_service_account_file(
@@ -259,15 +270,17 @@ def get_listings():
     if cache_updated:
         _save_geocache(geocache)
 
+    # Cache the results
+    _listings_cache[mode] = {"data": results, "ts": time.time()}
     return jsonify(results)
 
 
 @app.route("/run")
 def run_search():
     """Stream output from find_houses.py as server-sent events. ?mode=rent or buy (default)."""
+    mode = request.args.get("mode", "buy").lower()
     def stream():
         try:
-            mode = request.args.get("mode", "buy").lower()
             cmd = [sys.executable, "find_houses.py"]
             if mode == "rent":
                 cmd.append("--rent")

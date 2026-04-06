@@ -3,3 +3,7 @@ credentials.json
 __pycache__/
 *.pyc
 .env
+.DS_Store
+geocode_cache.json
+polygons.json
+email_recipients.json

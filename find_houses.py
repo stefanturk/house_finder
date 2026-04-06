@@ -32,11 +32,13 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*Python vers
 warnings.filterwarnings("ignore", message=".*urllib3.*only supports OpenSSL.*")
 
 import os
+import sys
 import re
 import json
 import time
 import sqlite3
 from datetime import datetime, timedelta
+from typing import Optional
 
 import requests
 import gspread
@@ -57,12 +59,23 @@ class QuotaExceededException(Exception):
 # ── Config ────────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-RAPIDAPI_KEY  = os.environ.get("RAPIDAPI_KEY", "")
-RAPIDAPI_HOST = "zllw-working-api.p.rapidapi.com"
-RAPIDAPI_KEY_BACKUP  = os.environ.get("RAPIDAPI_KEY_BACKUP", "")     # US Property Market — photos + walk scores (no polygon search)
-RAPIDAPI_HOST_BACKUP = "us-property-market1.p.rapidapi.com"
-RAPIDAPI_KEY_BACKUP2  = os.environ.get("RAPIDAPI_KEY_BACKUP2", "")    # private-zillow — backup polygon search + photos + walk scores
-RAPIDAPI_HOST_BACKUP2 = "private-zillow.p.rapidapi.com"
+
+# ── RapidAPI Keys ────────────────────────────────────────────────────────────
+
+# PRIMARY: private-zillow (250 requests/month, free tier)
+# Capabilities: /search/bypolygon (polygon search), /propimages (photos), /walk_transit_bike (scores)
+RAPIDAPI_KEY_PRIVATE_ZILLOW  = os.environ.get("RAPIDAPI_KEY_PRIVATE_ZILLOW", "")
+RAPIDAPI_HOST_PRIVATE_ZILLOW = "private-zillow.p.rapidapi.com"
+
+# ENRICHMENT: US Property Market (600 requests/month)
+# Capabilities: /property (descriptions by address), /photos (photos by zpid), /walkTransitBikeScores (scores by zpid)
+RAPIDAPI_KEY_US_PROPERTY_MARKET  = os.environ.get("RAPIDAPI_KEY_US_PROPERTY_MARKET", "")
+RAPIDAPI_HOST_US_PROPERTY_MARKET = "us-property-market1.p.rapidapi.com"
+
+# FALLBACK: ZLLW Working API (limited quota, often hits 429)
+# Capabilities: /search/bypolygon (polygon search)
+RAPIDAPI_KEY_ZLLW  = os.environ.get("RAPIDAPI_KEY_ZLLW", "")
+RAPIDAPI_HOST_ZLLW = "zllw-working-api.p.rapidapi.com"
 
 # Search areas — load from polygons.json (created by GUI)
 # Falls back to hardcoded polygon if file not found
@@ -124,11 +137,11 @@ MAX_LISTING_AGE_DAYS = 30  # skip listings on market > this many days (saves API
                            # set back to 30 for daily use to minimize /pro/byaddress calls
 MIN_DUNGEON_SCORE = 2      # minimum dungeon score to add to sheet
 MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
-MAX_PER_RUN       = 20     # cap Claude calls per run (set to None for no limit)
+MAX_PER_RUN       = 5      # cap Claude calls per run (set to None for no limit)
 REQUEST_TIMEOUT   = 20
 
 # ── Hard pre-filters (no Claude cost, aggressive unsuitable listings filtering) ───
-MIN_SQFT       = 1000   # skip studios / very small units
+MIN_SQFT       = 900   # skip studios / very small units
 MIN_YEAR_OLD   = 1978   # if newer than this AND small lot, skip (no basement likely)
 
 # ── Listing mode: "For_Sale" or "For_Rent" (change to search rentals) ───────────
@@ -497,18 +510,18 @@ def _normalize_zillow56_result(raw: dict) -> dict:
     }
 
 
-def _fetch_photo(zpid: str) -> str | None:
+def _fetch_photo(zpid: str) -> Optional[str]:
     """Fetch the first photo URL for a property via private-zillow. Returns None on failure."""
-    if not RAPIDAPI_KEY_BACKUP2:
+    if not RAPIDAPI_KEY_PRIVATE_ZILLOW:
         return None
     try:
         headers = {
             "Content-Type": "application/json",
-            "x-rapidapi-host": RAPIDAPI_HOST_BACKUP2,
-            "x-rapidapi-key": RAPIDAPI_KEY_BACKUP2,
+            "x-rapidapi-host": RAPIDAPI_HOST_PRIVATE_ZILLOW,
+            "x-rapidapi-key": RAPIDAPI_KEY_PRIVATE_ZILLOW,
         }
         resp = requests.get(
-            f"https://{RAPIDAPI_HOST_BACKUP2}/propimages",
+            f"https://{RAPIDAPI_HOST_PRIVATE_ZILLOW}/propimages",
             params={"byzpid": zpid},
             headers=headers,
             timeout=REQUEST_TIMEOUT,
@@ -528,18 +541,18 @@ def _fetch_photo(zpid: str) -> str | None:
     return None
 
 
-def _fetch_walk_scores(zpid: str) -> dict | None:
+def _fetch_walk_scores(zpid: str) -> Optional[dict]:
     """Fetch walk/transit/bike scores via private-zillow. Returns dict or None."""
-    if not RAPIDAPI_KEY_BACKUP2:
+    if not RAPIDAPI_KEY_PRIVATE_ZILLOW:
         return None
     try:
         headers = {
             "Content-Type": "application/json",
-            "x-rapidapi-host": RAPIDAPI_HOST_BACKUP2,
-            "x-rapidapi-key": RAPIDAPI_KEY_BACKUP2,
+            "x-rapidapi-host": RAPIDAPI_HOST_PRIVATE_ZILLOW,
+            "x-rapidapi-key": RAPIDAPI_KEY_PRIVATE_ZILLOW,
         }
         resp = requests.get(
-            f"https://{RAPIDAPI_HOST_BACKUP2}/walk_transit_bike",
+            f"https://{RAPIDAPI_HOST_PRIVATE_ZILLOW}/walk_transit_bike",
             params={"byzpid": zpid},
             headers=headers,
             timeout=REQUEST_TIMEOUT,
@@ -558,13 +571,22 @@ def _fetch_walk_scores(zpid: str) -> dict | None:
     return None
 
 
-def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
-    """Fetch one page for a given polygon. Returns (parsed_listings, total_pages).
+def _fetch_page(page: int = 1, polygon: str = "", api_stats: dict = None) -> tuple[list, int, dict]:
+    """Fetch one page for a given polygon. Returns (parsed_listings, total_pages, api_calls_made).
     Retries with backup API on primary failure (except 429 quota)."""
+    if api_stats is None:
+        api_stats = {}
+
     if not polygon:
-        return [], 0
+        return [], 0, api_stats
     if page == 1:
         print(f"    [polygon] {polygon[:50]}...")
+
+    # Use rent prices in rent mode, buy prices in buy mode
+    if LISTING_STATUS == "For_Rent":
+        min_price, max_price = RENT_PRICE_MIN, RENT_PRICE_MAX
+    else:
+        min_price, max_price = PRICE_MIN, PRICE_MAX
 
     params = {
         "polygon":       polygon,
@@ -572,10 +594,10 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
         "propertyType":  "SingleFamily,MultiFamily",
         "page":          page,
     }
-    if PRICE_MIN is not None:
-        params["minPrice"] = PRICE_MIN
-    if PRICE_MAX is not None:
-        params["maxPrice"] = PRICE_MAX
+    if min_price is not None:
+        params["minPrice"] = min_price
+    if max_price is not None:
+        params["maxPrice"] = max_price
     if MIN_BEDS:
         params["minBeds"] = MIN_BEDS
 
@@ -596,26 +618,29 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
             print(f"  [api] Network error on {host}: {e}")
             return None, None
 
-    # Try primary API
-    status, resp = _attempt(RAPIDAPI_HOST, RAPIDAPI_KEY)
+    # Try primary API (private-zillow)
+    status, resp = _attempt(RAPIDAPI_HOST_PRIVATE_ZILLOW, RAPIDAPI_KEY_PRIVATE_ZILLOW)
     use_adapter = False
+    api_stats["private-zillow"] = api_stats.get("private-zillow", 0) + 1
 
-    # Retry with BACKUP2 (private-zillow) on failure
-    if status != 200 and RAPIDAPI_KEY_BACKUP2:
+    # Retry with BACKUP2 (ZLLW Working) on failure
+    if status != 200 and RAPIDAPI_KEY_ZLLW:
         if status == 429:
-            print(f"  [api] Primary quota exceeded (429), trying private-zillow backup...")
+            print(f"  [api] Primary quota exceeded (429), trying ZLLW backup...")
         elif status:
-            print(f"  [api] Primary returned {status}, trying private-zillow backup...")
+            print(f"  [api] Primary returned {status}, trying ZLLW backup...")
         else:
-            print(f"  [api] Primary network error, trying private-zillow backup...")
-        status, resp = _attempt(RAPIDAPI_HOST_BACKUP2, RAPIDAPI_KEY_BACKUP2)
-        use_adapter = False  # private-zillow uses same /search/bypolygon endpoint, no adapter needed
+            print(f"  [api] Primary network error, trying ZLLW backup...")
+        status, resp = _attempt(RAPIDAPI_HOST_ZLLW, RAPIDAPI_KEY_ZLLW)
+        use_adapter = False  # ZLLW uses same /search/bypolygon endpoint, no adapter needed
+        api_stats["zllw"] = api_stats.get("zllw", 0) + 1
 
-    # Final fallback to BACKUP (only if manually set to Zillow56, with adapter)
-    if status != 200 and RAPIDAPI_KEY_BACKUP and RAPIDAPI_HOST_BACKUP != "us-property-market1.p.rapidapi.com":
+    # Final fallback to BACKUP (only if manually set to something, with adapter)
+    if status != 200 and RAPIDAPI_KEY_US_PROPERTY_MARKET and RAPIDAPI_HOST_US_PROPERTY_MARKET != "us-property-market1.p.rapidapi.com":
         print(f"  [api] Backups exhausted, trying final fallback...")
-        status, resp = _attempt(RAPIDAPI_HOST_BACKUP, RAPIDAPI_KEY_BACKUP)
-        use_adapter = True  # only if it's Zillow56
+        status, resp = _attempt(RAPIDAPI_HOST_US_PROPERTY_MARKET, RAPIDAPI_KEY_US_PROPERTY_MARKET)
+        use_adapter = True  # adapter if needed
+        api_stats["backup"] = api_stats.get("backup", 0) + 1
 
     # If both APIs fail, raise or return empty
     if status == 429:
@@ -623,13 +648,13 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
     if status != 200:
         if status is not None:
             print(f"  [api] HTTP {status}: {resp.text[:200] if resp else 'no response'}")
-        return [], 0
+        return [], 0, api_stats
 
     try:
         data = resp.json()
     except Exception:
         print(f"  [api] Non-JSON response")
-        return [], 0
+        return [], 0, api_stats
 
     raw_results = data.get("searchResults", [])
 
@@ -642,20 +667,25 @@ def _fetch_page(page: int = 1, polygon: str = "") -> tuple[list, int]:
     listings    = [l for l in (_parse_listing(r) for r in raw_results) if l]
     total_pages = int((data.get("pagesInfo") or {}).get("totalPages") or 1)
 
-    return listings, total_pages
+    return listings, total_pages, api_stats
 
 
 # ── Pre-filter ────────────────────────────────────────────────────────────────
 
 def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     """Hard pre-filters — skip if fails any of these checks."""
-    # Check price
+    # Check price (use rent prices if in rent mode, buy prices otherwise)
     try:
         price = int(listing.get("price") or 0)
-        if PRICE_MIN and price < PRICE_MIN:
-            return False, f"price ${price:,} < ${PRICE_MIN:,}"
-        if PRICE_MAX and price > PRICE_MAX:
-            return False, f"price ${price:,} > ${PRICE_MAX:,}"
+        if LISTING_STATUS == "For_Rent":
+            min_price, max_price = RENT_PRICE_MIN, RENT_PRICE_MAX
+        else:
+            min_price, max_price = PRICE_MIN, PRICE_MAX
+
+        if min_price and price < min_price:
+            return False, f"price ${price:,} < ${min_price:,}"
+        if max_price and price > max_price:
+            return False, f"price ${price:,} > ${max_price:,}"
     except (ValueError, TypeError):
         pass
 
@@ -726,28 +756,28 @@ def _is_sparse(listing: dict) -> bool:
 # ── Property Details (descriptions) ───────────────────────────────────────────
 
 def _fetch_property_description(address: str) -> dict:
-    """Fetch full property details from /pro/byaddress endpoint."""
+    """Fetch full property details from US Property Market /property endpoint (600 calls/month quota)."""
     try:
         headers = {
             "Content-Type": "application/json",
-            "x-rapidapi-host": RAPIDAPI_HOST,
-            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": RAPIDAPI_HOST_US_PROPERTY_MARKET,
+            "x-rapidapi-key": RAPIDAPI_KEY_US_PROPERTY_MARKET,
         }
         resp = requests.get(
-            f"https://{RAPIDAPI_HOST}/pro/byaddress",
-            params={"propertyaddress": address},
+            f"https://{RAPIDAPI_HOST_US_PROPERTY_MARKET}/property",
+            params={"address": address},
             headers=headers,
             timeout=REQUEST_TIMEOUT
         )
         if resp.status_code == 200:
             data = resp.json()
-            details = data.get("propertyDetails", {})
+            # US Property Market returns description in topLevelDescription or uses None
             return {
-                "description": details.get("description"),
-                "bedrooms": details.get("resoFacts", {}).get("bedrooms"),
-                "bathrooms": details.get("resoFacts", {}).get("bathroomsFloat"),
-                "sqft": details.get("resoFacts", {}).get("aboveGradeFinishedArea"),
-                "listing_type": details.get("listingTypeDimension"),  # e.g., "Pre-Foreclosure"
+                "description": data.get("topLevelDescription") or data.get("description"),
+                "bedrooms": data.get("bedrooms"),
+                "bathrooms": data.get("bathrooms"),
+                "sqft": data.get("sqft"),
+                "listing_type": data.get("listingType"),
             }
     except Exception as e:
         pass
@@ -923,9 +953,9 @@ def _analyze_with_claude(listing: dict, token_totals: dict, description: str = N
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    if not RAPIDAPI_KEY:
-        print("ERROR: RAPIDAPI_KEY env var not set.")
-        print("Run: export RAPIDAPI_KEY=your_key   (or add to ~/.zshrc)")
+    if not RAPIDAPI_KEY_PRIVATE_ZILLOW:
+        print("ERROR: RAPIDAPI_KEY_PRIVATE_ZILLOW env var not set.")
+        print("Run: export RAPIDAPI_KEY_PRIVATE_ZILLOW=your_key   (or add to ~/.zshrc)")
         return
 
     # ── 1. Connect Sheets ─────────────────────────────────────────────────────
@@ -951,12 +981,13 @@ def main():
     print(f"\nFetching listings ({len(polygons)} polygon{'s' if len(polygons) != 1 else ''})...")
     all_listings = []
     seen_zpids_this_run = set()
+    api_call_stats = {}
     for poly_idx, polygon in enumerate(polygons, 1):
         print(f"  Polygon {poly_idx}/{len(polygons)}...")
         for page in range(1, MAX_PAGES + 1):
             print(f"    Page {page}...", end=" ", flush=True)
             try:
-                listings, total_pages = _fetch_page(page, polygon)
+                listings, total_pages, api_call_stats = _fetch_page(page, polygon, api_call_stats)
             except QuotaExceededException:
                 now = datetime.now()
                 reset = datetime(
@@ -985,6 +1016,7 @@ def main():
 
     if not new_listings:
         print("\nNo new listings. Done.")
+        print(f"  Zillow API calls: private-zillow={api_call_stats.get('private-zillow', 0)} zllw={api_call_stats.get('zllw', 0)} backup={api_call_stats.get('backup', 0)}")
         return
 
     # ── 5-7. Pre-filter → Claude → Sheet ─────────────────────────────────────
@@ -1128,10 +1160,6 @@ def main():
         if d >= MIN_DUNGEON_SCORE:
             # Collect houses with Overall > 3 for email digest
             if overall > 3:
-                # Fetch enrichment data (photos, walk scores) for qualifying houses
-                photo_url = _fetch_photo(str(listing["zpid"]))
-                walk_scores = _fetch_walk_scores(str(listing["zpid"]))
-
                 house_for_email = {
                     "address": listing["address"],
                     "price": _format_price(listing["price"]),
@@ -1148,8 +1176,6 @@ def main():
                     "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
                     "favorite": "FALSE",
                     "date_added": datetime.now().strftime("%Y-%m-%d"),
-                    "photo_url": photo_url,
-                    "walk_scores": walk_scores,
                 }
                 newly_added_houses.append(house_for_email)
 
@@ -1177,6 +1203,7 @@ def main():
     print(f"  Score skip     : {count_score_skip}")
     print(f"  Errors         : {count_error}")
     print(f"  Added to sheet : {count_added}")
+    print(f"  Zillow API calls: private-zillow={api_call_stats.get('private-zillow', 0)} zllw={api_call_stats.get('zllw', 0)} backup={api_call_stats.get('backup', 0)}")
     print(f"  Tokens         : {tok_in:,} in / {tok_out:,} out")
     print(f"  Est. cost      : ${cost:.4f}")
 

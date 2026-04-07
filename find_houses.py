@@ -1533,10 +1533,11 @@ def main():
 
                 if analysis is None:
                     # Claude error: update skip reason
+                    # Preserve the original mode from the row (don't use current LISTING_STATUS)
                     new_skip_reason = "Pending (Claude error on re-analysis)"
                     _delete_row_by_index(ws_skipped, row_idx)
-                    mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-                    row = _build_skipped_row(listing, None, mode_str, new_skip_reason)
+                    original_mode = row_data[len(SHEET_HEADERS)] if len(row_data) > len(SHEET_HEADERS) else "buy"
+                    row = _build_skipped_row(listing, None, original_mode, new_skip_reason)
                     _write_skipped_rows_batch(ws_skipped, [row])
                     print(f"    → Claude error, marked as pending")
                     count_pending_analyzed += 1
@@ -1586,9 +1587,10 @@ def main():
                         newly_added_houses.append(house_for_email)
                 else:
                     # Still fails: update skip reason
+                    # Preserve the original mode from the row (don't use current LISTING_STATUS)
                     _delete_row_by_index(ws_skipped, row_idx)
-                    mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-                    row = _build_skipped_row(listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
+                    original_mode = row_data[len(SHEET_HEADERS)] if len(row_data) > len(SHEET_HEADERS) else "buy"
+                    row = _build_skipped_row(listing, analysis, original_mode, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
                     _write_skipped_rows_batch(ws_skipped, [row])
                     print(f"    → Dungeon:{d} SKIP (re-analyzed from pending)")
                     count_score_skip += 1

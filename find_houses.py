@@ -11,8 +11,9 @@ Scores are 1–5 (5=best):
   Neighborhood — desirability (Rockridge=5, industrial=1)
   Turnkey     — move-in readiness (5=turnkey, 1=major reno)
 
-Run any time: fetches fresh listings, skips already-processed ones (SQLite),
-appends new qualifying rows to the sheet.
+Run any time: fetches fresh listings, deduplicates against both tabs,
+analyzes with Claude, writes qualifying rows to Buy/Rent Finder and rejected
+rows to Skipped Houses.
 
 NOTE: The ZLLW search API does not return listing descriptions. Claude uses
 structural data (year built, sqft, lot size, address) and its knowledge of
@@ -22,7 +23,10 @@ Upgrade path for descriptions: subscribe to "Zillow Property Data" by APIlive
 on RapidAPI and implement fetch_property_description(zpid) — see TODO below.
 
 Usage:
-    python3 house_finder.py
+    python3 house_finder.py              # Search for-sale listings (page 1)
+    python3 house_finder.py --rent       # Search rental listings (page 1)
+    python3 house_finder.py --all-pages  # Search all pages (more API calls, more backlog)
+    python3 house_finder.py --rent --all-pages  # Search all rental pages
 """
 
 import warnings
@@ -564,7 +568,7 @@ def _write_skipped_rows_batch(ws: gspread.Worksheet, rows: list) -> None:
 
 
 def _load_pending_rows(ws_skipped: gspread.Worksheet) -> list:
-    """Load rows marked 'Pending analysis — delete row to re-analyze' from Skipped Houses.
+    """Load rows marked 'Pending analysis' from Skipped Houses for re-analysis.
     Returns list of dicts: {row_index, row_data, zpid}."""
     pending = []
     try:
@@ -1308,7 +1312,7 @@ def main():
 
     if new_listings:
         print(f"\nAnalyzing {len(new_listings)} new listings "
-              f"(writing to sheet if dungeon_score >= {MIN_DUNGEON_SCORE})...\n")
+              f"(Add to Buy/Rent Finder if dungeon >= {MIN_DUNGEON_SCORE}, else Skipped Houses)...\n")
 
     cap_reached = False
     for listing in new_listings:
@@ -1401,7 +1405,7 @@ def main():
                 cap_reached = True
                 print(f"  [MAX_JUDGEMENTS={MAX_JUDGEMENTS} reached — shelving remaining listings]")
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            skipped_rows_buffer.append(_build_skipped_row(listing, None, mode_str, "Pending analysis — delete row to re-analyze"))
+            skipped_rows_buffer.append(_build_skipped_row(listing, None, mode_str, "Pending analysis"))
             if len(skipped_rows_buffer) >= BATCH_SIZE:
                 _flush_skipped_buffer()
             count_shelved += 1
@@ -1639,7 +1643,7 @@ def main():
         print(f"Sending email for {len(newly_added_houses)} qualifying house(s)...")
         send_email(newly_added_houses, mode=mode_str)
     else:
-        print("No new qualifying houses (Overall > 3). No email sent.")
+        print("No qualifying houses with Overall > 3. Email not sent.")
 
 
 if __name__ == "__main__":

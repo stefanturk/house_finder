@@ -1472,11 +1472,19 @@ def main():
                 # Check dungeon score
                 d = analysis.get("dungeon_score", 0)
                 if d >= MIN_DUNGEON_SCORE:
-                    # Qualifies! Add to main sheet and delete from pending
-                    _delete_row_by_index(ws_skipped, row_idx)
-                    _write_sheet_row(ws, listing, analysis)
-                    print(f"    → Dungeon:{d} ADDED ✓ (re-analyzed from pending)")
-                    count_added += 1
+                    # Qualifies! Check if already in active sheet before adding
+                    existing_in_active = zpid in _load_processed_zpids_from_sheets(ws, None)
+
+                    if existing_in_active:
+                        # Already in Buy/Rent Finder, just delete from pending
+                        _delete_row_by_index(ws_skipped, row_idx)
+                        print(f"    → Dungeon:{d} Already in sheet, removed from pending")
+                    else:
+                        # Add to main sheet and delete from pending
+                        _delete_row_by_index(ws_skipped, row_idx)
+                        _write_sheet_row(ws, listing, analysis)
+                        print(f"    → Dungeon:{d} ADDED ✓ (re-analyzed from pending)")
+                        count_added += 1
 
                     # Collect for email if overall > 3
                     b = analysis.get("backyard_score", 0)

@@ -497,10 +497,8 @@ def _get_skipped_sheet() -> tuple[gspread.Worksheet, gspread.Spreadsheet]:
     return ws, spreadsheet
 
 
-def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mode_str: str, skip_reason: str) -> None:
-    """Write a skipped listing row to the Skipped Houses tab.
-    Includes available scores if analysis exists, empty otherwise.
-    Uses append_row (adds to end) instead of insert_row to avoid quota exhaustion."""
+def _build_skipped_row(listing: dict, analysis: dict, mode_str: str, skip_reason: str) -> list:
+    """Build a skipped listing row (does not write). Returns row data as list."""
     zpid = listing["zpid"]
     lot_sqft = listing["lot_sqft"]
     lot_str = f"{lot_sqft:,.0f}" if lot_sqft else ""
@@ -546,8 +544,23 @@ def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mod
         mode_str,                                                    # S (Mode)
         skip_reason,                                                 # T (Skip Reason)
     ]
-    # Append to end (no shift cost). Qualifying listings use insert_row(index=2) at top.
-    _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
+    return row
+
+
+def _write_skipped_rows_batch(ws: gspread.Worksheet, rows: list) -> None:
+    """Write multiple skipped rows in a single batch API call."""
+    if not rows:
+        return
+    try:
+        _sheets_call(lambda: ws.append_rows(rows, value_input_option="USER_ENTERED"))
+    except Exception as e:
+        print(f"  Warning: batch write failed: {e}, retrying one-by-one...")
+        # Fallback: write one at a time
+        for row in rows:
+            try:
+                _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
+            except Exception as e2:
+                print(f"    Skipped row write failed: {e2}")
 
 
 def _load_pending_rows(ws_skipped: gspread.Worksheet) -> list:
@@ -1196,6 +1209,17 @@ def main():
         print(f"  Sheets error: {e}")
         return
 
+    # Buffer for batching skipped row writes (to avoid quota exhaustion)
+    skipped_rows_buffer = []
+    BATCH_SIZE = 20  # Flush buffer every N rows
+
+    def _flush_skipped_buffer():
+        """Flush accumulated skipped rows to sheet in one batch."""
+        nonlocal skipped_rows_buffer
+        if skipped_rows_buffer:
+            _write_skipped_rows_batch(ws_skipped, skipped_rows_buffer)
+            skipped_rows_buffer = []
+
     # ── 2. Load processed zpids from both active and skipped tabs ──────────────
     print("\nLoading processed listings...")
     processed = _load_processed_zpids_from_sheets(ws, ws_skipped)
@@ -1283,7 +1307,9 @@ def main():
             print(f"    → SKIP: {skip_reason}")
             count_prefiltered += 1
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            _write_skipped_row(ws_skipped, listing, None, mode_str, skip_reason)
+            skipped_rows_buffer.append(_build_skipped_row(listing, None, mode_str, skip_reason))
+            if len(skipped_rows_buffer) >= BATCH_SIZE:
+                _flush_skipped_buffer()
             continue
 
         # Handle sparse listings (foreclosures/pre-foreclosures with minimal data)
@@ -1308,7 +1334,9 @@ def main():
             # OR bed/bath counts suggesting potential 4+ units
             if is_multifamily and (has_range_address or beds >= 7 or baths >= 5):
                 mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-                _write_skipped_row(ws_skipped, listing, None, mode_str, "Multi Family sparse — can't verify unit count")
+                skipped_rows_buffer.append(_build_skipped_row(listing, None, mode_str, "Multi Family sparse — can't verify unit count"))
+                if len(skipped_rows_buffer) >= BATCH_SIZE:
+                    _flush_skipped_buffer()
                 print(f"    → SKIP: Multi Family with insufficient data (can't verify unit count)")
                 count_score_skip += 1
                 continue
@@ -1338,7 +1366,9 @@ def main():
             }
             # Sparse listings (all 1s) go to Skipped Houses only, not main sheet
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            _write_skipped_row(ws_skipped, listing, analysis, mode_str, sparse_label)
+            skipped_rows_buffer.append(_build_skipped_row(listing, analysis, mode_str, sparse_label))
+            if len(skipped_rows_buffer) >= BATCH_SIZE:
+                _flush_skipped_buffer()
             print(f"    → SKIP (sparse): {sparse_label}")
             count_sparse += 1
             continue
@@ -1349,7 +1379,9 @@ def main():
                 cap_reached = True
                 print(f"  [MAX_JUDGEMENTS={MAX_JUDGEMENTS} reached — shelving remaining listings]")
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            _write_skipped_row(ws_skipped, listing, None, mode_str, "Pending analysis — delete row to re-analyze")
+            skipped_rows_buffer.append(_build_skipped_row(listing, None, mode_str, "Pending analysis — delete row to re-analyze"))
+            if len(skipped_rows_buffer) >= BATCH_SIZE:
+                _flush_skipped_buffer()
             count_shelved += 1
             continue
 
@@ -1370,7 +1402,9 @@ def main():
         if analysis is None:
             count_error += 1
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            _write_skipped_row(ws_skipped, listing, None, mode_str, "Claude API error")
+            skipped_rows_buffer.append(_build_skipped_row(listing, None, mode_str, "Claude API error"))
+            if len(skipped_rows_buffer) >= BATCH_SIZE:
+                _flush_skipped_buffer()
             continue
 
         # Reject 4+ unit properties — check both Claude's output and API data
@@ -1400,7 +1434,9 @@ def main():
 
         if skip_4plus:
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            _write_skipped_row(ws_skipped, listing, analysis, mode_str, f"4+ unit property ({prop_type})")
+            skipped_rows_buffer.append(_build_skipped_row(listing, analysis, mode_str, f"4+ unit property ({prop_type})"))
+            if len(skipped_rows_buffer) >= BATCH_SIZE:
+                _flush_skipped_buffer()
             print(f"    → SKIP: 4+ unit property (API: {home_type_api}, beds: {beds}, baths: {baths})")
             count_score_skip += 1
             continue
@@ -1440,7 +1476,9 @@ def main():
             count_added += 1
         else:
             mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-            _write_skipped_row(ws_skipped, listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
+            skipped_rows_buffer.append(_build_skipped_row(listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}"))
+            if len(skipped_rows_buffer) >= BATCH_SIZE:
+                _flush_skipped_buffer()
             print(f"    → SKIP: dungeon {d} < {MIN_DUNGEON_SCORE}")
             count_score_skip += 1
 
@@ -1535,6 +1573,9 @@ def main():
 
             if count_pending_analyzed > 0:
                 print(f"  Re-analyzed {count_pending_analyzed} pending listing(s)")
+
+    # Flush any remaining buffered skipped rows
+    _flush_skipped_buffer()
 
     # ── 8. Summary ────────────────────────────────────────────────────────────
     tok_in  = token_totals["input"]

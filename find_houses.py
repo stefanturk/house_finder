@@ -889,16 +889,17 @@ def _fetch_page(page: int = 1, polygon: str = "", api_stats: dict = None) -> tup
 
 def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     """Hard pre-filters — skip if fails any of these checks."""
-    # Validate listing status matches requested mode (API doesn't always honor filter)
+    # CRITICAL: Check listing status FIRST before any other filters
+    # (API doesn't always honor listingStatus parameter)
     status_type = (listing.get("status_type") or "").lower()
     if LISTING_STATUS == "For_Rent":
         # In rent mode: reject if status suggests it's for sale
         if "forsale" in status_type or status_type == "for_sale":
-            return False, f"listing status '{status_type}' is for sale, not rent"
+            return False, f"wrong mode: listing is for sale, not rent"
     else:
         # In buy mode: reject if status suggests it's for rent
         if "forrent" in status_type or status_type == "for_rent":
-            return False, f"listing status '{status_type}' is for rent, not sale"
+            return False, f"wrong mode: listing is for rent, not sale"
 
     # Check price (use rent prices if in rent mode, buy prices otherwise)
     try:

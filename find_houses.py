@@ -896,6 +896,12 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     # This catches condos, apartments, townhouses, manufactured, unknown types, AND empty types
     home_type = (listing.get("home_type") or "").lower()
     allowed_types = {"singlefamily", "multifamily"}
+
+    # Explicit blocklist for common non-qualifying types (even if they slip through as MultiFamily)
+    blocked_types = {"apartment", "condo", "townhouse", "townhome", "manufactured", "mobile"}
+    if any(blocked in home_type for blocked in blocked_types):
+        return False, f"property type '{listing['home_type'] or 'unknown'}' is explicitly blocked"
+
     if not any(t in home_type for t in allowed_types):
         return False, f"property type '{listing['home_type'] or 'unknown'}' not singleFamily/multiFamily"
 

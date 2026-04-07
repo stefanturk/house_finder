@@ -429,7 +429,8 @@ def _write_sheet_row(ws: gspread.Worksheet, listing: dict, analysis: dict) -> No
         datetime.now().strftime("%Y-%m-%d %H:%M"),                  # Q
         "FALSE",                                                     # R (Favorite)
     ]
-    _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
+    # Insert at row 2 (right after header) so new listings appear at the top
+    _sheets_call(lambda: ws.insert_row(row, index=2, value_input_option="USER_ENTERED"))
 
 
 # ── Sheet-based deduplication (replaces SQLite) ───────────────────────────────
@@ -544,7 +545,8 @@ def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mod
         mode_str,                                                    # S (Mode)
         skip_reason,                                                 # T (Skip Reason)
     ]
-    _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
+    # Insert at row 2 (right after header) so new listings appear at the top
+    _sheets_call(lambda: ws.insert_row(row, index=2, value_input_option="USER_ENTERED"))
 
 
 # ── RapidAPI ──────────────────────────────────────────────────────────────────

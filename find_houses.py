@@ -131,12 +131,10 @@ MIN_BEDS          = 2
 MAX_BEDS          = 4      # reject if > 4 beds (Duplex/Triplex max, not 4+ unit buildings)
 MIN_BATHS         = 1      # Minimum bathrooms
 MAX_BATHS         = 3      # Maximum bathrooms
-MAX_LISTING_AGE_DAYS = 30  # skip listings on market > this many days (saves API calls)
-                           # Increase to 90+ on first run to catch all existing inventory;
-                           # set back to 30 for daily use to minimize /pro/byaddress calls
+MAX_LISTING_AGE_DAYS = 0   # skip listings on market > this many days (0 = no limit)
 MIN_DUNGEON_SCORE = 2      # minimum dungeon score to add to sheet
 MAX_PAGES         = 1      # 1 API request per page; free tier = 500 req/month
-MAX_PER_RUN       = 5      # cap Claude calls per run (set to None for no limit)
+MAX_JUDGEMENTS    = 10     # max Claude analyses per run (set to None for no limit)
 REQUEST_TIMEOUT   = 20
 
 # ── Hard pre-filters (no Claude cost, aggressive unsuitable listings filtering) ───
@@ -806,16 +804,12 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     except (ValueError, TypeError):
         pass
 
-    # Reject condos / townhouses / apartments — explicit blocklist for types that slip through
+    # Strict allowlist: reject anything that's not SingleFamily or MultiFamily
+    # This catches condos, apartments, townhouses, manufactured, unknown types, AND empty types
     home_type = (listing.get("home_type") or "").lower()
-    rejected_types = {"condo", "apartment", "townhouse", "manufactured"}
-    if any(t in home_type for t in rejected_types):
-        return False, f"property type '{listing['home_type']}' is condo/apartment/townhouse"
-
-    # Also check allowlist (SingleFamily/MultiFamily)
     allowed_types = {"singlefamily", "multifamily"}
-    if home_type and not any(t in home_type for t in allowed_types):
-        return False, f"property type '{listing['home_type']}' not singleFamily/multiFamily"
+    if not any(t in home_type for t in allowed_types):
+        return False, f"property type '{listing['home_type'] or 'unknown'}' not singleFamily/multiFamily"
 
     # Check sqft
     try:
@@ -847,8 +841,8 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
         except (ValueError, TypeError):
             pass
 
-    # Check listing age (days on market)
-    if MAX_LISTING_AGE_DAYS:
+    # Check listing age (days on market) — skip if MAX_LISTING_AGE_DAYS is 0 (no limit)
+    if MAX_LISTING_AGE_DAYS and MAX_LISTING_AGE_DAYS > 0:
         try:
             days = int(listing.get("days_on_zillow") or 0)
             if days > MAX_LISTING_AGE_DAYS:
@@ -1119,9 +1113,12 @@ def main():
     all_listings = []
     seen_zpids_this_run = set()
     api_call_stats = {}
+    use_all_pages = "--all-pages" in sys.argv
     for poly_idx, polygon in enumerate(polygons, 1):
         print(f"  Polygon {poly_idx}/{len(polygons)}...")
-        for page in range(1, MAX_PAGES + 1):
+        # Determine max pages: use all pages if --all-pages flag, else respect MAX_PAGES
+        effective_max_pages = 1000 if use_all_pages else MAX_PAGES
+        for page in range(1, effective_max_pages + 1):
             print(f"    Page {page}...", end=" ", flush=True)
             try:
                 listings, total_pages, api_call_stats = _fetch_page(page, polygon, api_call_stats)
@@ -1141,6 +1138,12 @@ def main():
             new_listings = [l for l in listings if l["zpid"] not in seen_zpids_this_run]
             seen_zpids_this_run.update(l["zpid"] for l in new_listings)
             print(f"{len(new_listings)} new listings (total pages: {total_pages})")
+
+            # Warn if pagination is truncated
+            if page == 1 and total_pages > MAX_PAGES and not use_all_pages:
+                print(f"  ⚠️  {total_pages} pages available — only fetching {MAX_PAGES}.")
+                print(f"     Run with --all-pages to fetch all, or increase MAX_PAGES in config.")
+
             all_listings.extend(new_listings)
             if page >= total_pages:
                 break
@@ -1167,13 +1170,11 @@ def main():
     count_score_skip  = 0
     count_added       = 0
     count_error       = 0
+    count_shelved     = 0
     newly_added_houses = []  # collect house dicts for email digest
 
+    cap_reached = False
     for listing in new_listings:
-        # Stop after MAX_PER_RUN Claude calls
-        if MAX_PER_RUN and count_claude >= MAX_PER_RUN:
-            print(f"  [stopping: reached MAX_PER_RUN={MAX_PER_RUN} Claude calls]")
-            break
 
         zpid    = listing["zpid"]
         address = listing["address"]
@@ -1249,6 +1250,16 @@ def main():
             _write_skipped_row(ws_skipped, listing, analysis, mode_str, sparse_label)
             print(f"    → SKIP (sparse): {sparse_label}")
             count_sparse += 1
+            continue
+
+        # Budget cap: shelf remaining listings without analyzing them
+        if MAX_JUDGEMENTS and count_claude >= MAX_JUDGEMENTS:
+            if not cap_reached:
+                cap_reached = True
+                print(f"  [MAX_JUDGEMENTS={MAX_JUDGEMENTS} reached — shelving remaining listings]")
+            mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+            _write_skipped_row(ws_skipped, listing, None, mode_str, "Pending analysis — delete row to re-analyze")
+            count_shelved += 1
             continue
 
         # Fetch full property details including description (with fallback to web scraping)
@@ -1356,6 +1367,7 @@ def main():
     print(f"  Claude analyzed: {count_claude}")
     print(f"  Score skip     : {count_score_skip}")
     print(f"  Errors         : {count_error}")
+    print(f"  Shelved (budget): {count_shelved}")
     print(f"  Added to sheet : {count_added}")
     # Count descriptions and walk_scores calls (they're only made for non-sparse listings that pass pre-filter)
     descriptions = api_call_stats.get('walk_scores', 0)  # descriptions called same # of times as walk_scores

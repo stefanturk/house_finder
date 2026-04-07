@@ -19,11 +19,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from the house_finder directory (not current working directory)
+env_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".env")
+load_dotenv(env_path)
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 SPREADSHEET_ID = "1MRKLmSjIkWUArbJwVgz9fgCSsh0WM7UoxPJCEeWe-ms"
-SHEET_TAB = "House Finder"
+SHEET_TAB = "Buy Finder"
 CREDS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "credentials.json")
 EMAIL_TO = "stefanturkowski@gmail.com"
 EMAIL_RECIPIENTS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "email_recipients.json")

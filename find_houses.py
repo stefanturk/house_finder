@@ -598,15 +598,23 @@ def _row_to_listing(row: list) -> dict:
     except (ValueError, AttributeError):
         price = None
 
+    # Parse lot_sqft, handling comma-formatted numbers
+    lot_sqft_val = None
+    if len(row) > 13 and row[13]:
+        try:
+            lot_sqft_val = float(row[13].replace(',', ''))
+        except (ValueError, AttributeError):
+            lot_sqft_val = None
+
     listing = {
         "zpid": zpid or "",
         "address": row[0] if len(row) > 0 else "",
         "price": price,
         "home_type": row[3] if len(row) > 3 else "",
-        "bedrooms": int(row[4]) if len(row) > 4 and row[4] and row[4].isdigit() else None,
-        "bathrooms": int(row[5]) if len(row) > 5 and row[5] and row[5].isdigit() else None,
-        "sqft": int(row[12]) if len(row) > 12 and row[12] and row[12].isdigit() else None,
-        "lot_sqft": _lot_to_sqft({"lotSize": float(row[13]) if len(row) > 13 and row[13] else None}) if len(row) > 13 else None,
+        "bedrooms": int(row[4]) if len(row) > 4 and row[4] and str(row[4]).isdigit() else None,
+        "bathrooms": int(row[5]) if len(row) > 5 and row[5] and str(row[5]).isdigit() else None,
+        "sqft": int(row[12]) if len(row) > 12 and row[12] and str(row[12]).isdigit() else None,
+        "lot_sqft": _lot_to_sqft({"lotSize": lot_sqft_val}) if lot_sqft_val else None,
         "year_built": None,  # Not stored in skipped rows, but OK for re-analysis
         "listing_type": "",
     }
@@ -616,7 +624,7 @@ def _row_to_listing(row: list) -> dict:
 def _delete_row_by_index(ws: gspread.Worksheet, row_index: int) -> None:
     """Delete a row from the worksheet by 1-indexed row number."""
     try:
-        _sheets_call(lambda: ws.delete_rows(row_index, row_index))
+        _sheets_call(lambda: ws.delete_rows(row_index))
     except Exception as e:
         print(f"  Warning: Could not delete row {row_index}: {e}")
 
@@ -1228,15 +1236,8 @@ def main():
     new_listings = [l for l in all_listings if l["zpid"] not in processed]
     print(f"  {len(new_listings)} new, {len(all_listings) - len(new_listings)} already seen.")
 
-    if not new_listings:
-        print("\nNo new listings. Done.")
-        print(f"  API calls: search={{private-zillow={api_call_stats.get('private-zillow', 0)}, zllw={api_call_stats.get('zllw', 0)}}} | descriptions=0 | walk_scores=0")
-        return
-
     # ── 5-7. Pre-filter → Claude → Sheet ─────────────────────────────────────
-    print(f"\nAnalyzing {len(new_listings)} new listings "
-          f"(writing to sheet if dungeon_score >= {MIN_DUNGEON_SCORE})...\n")
-
+    # Initialize counters BEFORE checking if there are new listings (needed for pending re-analysis)
     token_totals      = {"input": 0, "output": 0}
     count_prefiltered = 0
     count_sparse      = 0
@@ -1246,6 +1247,10 @@ def main():
     count_error       = 0
     count_shelved     = 0
     newly_added_houses = []  # collect house dicts for email digest
+
+    if new_listings:
+        print(f"\nAnalyzing {len(new_listings)} new listings "
+              f"(writing to sheet if dungeon_score >= {MIN_DUNGEON_SCORE})...\n")
 
     cap_reached = False
     for listing in new_listings:

@@ -549,6 +549,78 @@ def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mod
     _sheets_call(lambda: ws.insert_row(row, index=2, value_input_option="USER_ENTERED"))
 
 
+def _load_pending_rows(ws_skipped: gspread.Worksheet) -> list:
+    """Load rows marked 'Pending analysis — delete row to re-analyze' from Skipped Houses.
+    Returns list of dicts: {row_index, row_data, zpid}."""
+    pending = []
+    try:
+        rows = ws_skipped.get_all_values()
+        # Find the Skip Reason column (last column in SKIPPED_HEADERS)
+        skip_reason_idx = len(SKIPPED_HEADERS) - 1  # "Skip Reason" is the last column
+
+        for idx, row in enumerate(rows[1:], start=2):  # start at row 2 (1-indexed, after header)
+            if len(row) > skip_reason_idx and "Pending analysis" in row[skip_reason_idx]:
+                # Extract zpid from Zillow Link (column B, index 1)
+                zpid = None
+                if len(row) > 1:
+                    link = row[1]
+                    match = re.search(r'(\d+)_zpid', link)
+                    if match:
+                        zpid = match.group(1)
+
+                if zpid:
+                    pending.append({
+                        "row_index": idx,
+                        "row_data": row,
+                        "zpid": zpid
+                    })
+    except Exception:
+        pass
+    return pending
+
+
+def _row_to_listing(row: list) -> dict:
+    """Convert a skipped row back into a listing dict for re-analysis.
+    Reconstructs the listing structure from sheet row data."""
+    # Row structure matches SHEET_HEADERS (first 17 columns)
+    # A=address, B=zillow_link, C=price, D=home_type, E=beds, F=baths,
+    # G=overall, H=dungeon, I=backyard, J=lighting, K=neighborhood, L=turnkey,
+    # M=sqft, N=lot_sqft, O=reasoning, P=concerns, Q=date_found, R=favorite
+
+    zpid = None
+    if len(row) > 1:
+        match = re.search(r'(\d+)_zpid', row[1])
+        if match:
+            zpid = match.group(1)
+
+    try:
+        price = float(row[2].replace('$', '').replace(',', '')) if len(row) > 2 and row[2] else None
+    except (ValueError, AttributeError):
+        price = None
+
+    listing = {
+        "zpid": zpid or "",
+        "address": row[0] if len(row) > 0 else "",
+        "price": price,
+        "home_type": row[3] if len(row) > 3 else "",
+        "bedrooms": int(row[4]) if len(row) > 4 and row[4] and row[4].isdigit() else None,
+        "bathrooms": int(row[5]) if len(row) > 5 and row[5] and row[5].isdigit() else None,
+        "sqft": int(row[12]) if len(row) > 12 and row[12] and row[12].isdigit() else None,
+        "lot_sqft": _lot_to_sqft({"lotSize": float(row[13]) if len(row) > 13 and row[13] else None}) if len(row) > 13 else None,
+        "year_built": None,  # Not stored in skipped rows, but OK for re-analysis
+        "listing_type": "",
+    }
+    return listing
+
+
+def _delete_row_by_index(ws: gspread.Worksheet, row_index: int) -> None:
+    """Delete a row from the worksheet by 1-indexed row number."""
+    try:
+        _sheets_call(lambda: ws.delete_rows(row_index, row_index))
+    except Exception as e:
+        print(f"  Warning: Could not delete row {row_index}: {e}")
+
+
 # ── RapidAPI ──────────────────────────────────────────────────────────────────
 
 def _lot_to_sqft(lot_obj: dict):
@@ -1355,6 +1427,90 @@ def main():
             print(f"    → SKIP: dungeon {d} < {MIN_DUNGEON_SCORE}")
             count_score_skip += 1
 
+    # ── 7b. Re-analyze pending listings if budget available ──────────────────
+    count_pending_analyzed = 0
+    if count_claude < MAX_JUDGEMENTS and MAX_JUDGEMENTS:
+        pending_rows = _load_pending_rows(ws_skipped)
+        if pending_rows:
+            print(f"\n  {len(pending_rows)} pending analysis row(s) found. Re-analyzing with remaining budget...")
+            for pending_item in pending_rows:
+                if MAX_JUDGEMENTS and count_claude >= MAX_JUDGEMENTS:
+                    break
+
+                row_idx = pending_item["row_index"]
+                row_data = pending_item["row_data"]
+                zpid = pending_item["zpid"]
+
+                # Reconstruct listing from row data
+                listing = _row_to_listing(row_data)
+                address = listing["address"]
+                print(f"  {count_pending_analyzed + 1}. {address}")
+
+                # Fetch description
+                description_data = _fetch_property_description(address, zpid)
+                description = description_data.get("description")
+
+                # Analyze with Claude
+                analysis = _analyze_with_claude(listing, token_totals, description=description)
+                count_claude += 1
+
+                if analysis is None:
+                    # Claude error: update skip reason
+                    new_skip_reason = "Pending (Claude error on re-analysis)"
+                    _delete_row_by_index(ws_skipped, row_idx)
+                    mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+                    _write_skipped_row(ws_skipped, listing, None, mode_str, new_skip_reason)
+                    print(f"    → Claude error, marked as pending")
+                    count_pending_analyzed += 1
+                    continue
+
+                # Check dungeon score
+                d = analysis.get("dungeon_score", 0)
+                if d >= MIN_DUNGEON_SCORE:
+                    # Qualifies! Add to main sheet and delete from pending
+                    _delete_row_by_index(ws_skipped, row_idx)
+                    _write_sheet_row(ws, listing, analysis)
+                    print(f"    → Dungeon:{d} ADDED ✓ (re-analyzed from pending)")
+                    count_added += 1
+
+                    # Collect for email if overall > 3
+                    b = analysis.get("backyard_score", 0)
+                    l = analysis.get("lighting_score", 0)
+                    n = analysis.get("neighborhood_score", 0)
+                    turnkey = analysis.get("turnkey_score", 0)
+                    overall = round((d + b + l + n + turnkey) / 5, 1) if any([d, b, l, n, turnkey]) else 0
+                    if overall > 3:
+                        house_for_email = {
+                            "address": listing["address"],
+                            "price": _format_price(listing["price"]),
+                            "type": analysis.get("property_type", listing.get("home_type", "")),
+                            "beds": listing["bedrooms"],
+                            "baths": listing["bathrooms"],
+                            "overall": overall,
+                            "dungeon": d,
+                            "backyard": b,
+                            "lighting": l,
+                            "neighborhood": n,
+                            "turnkey": turnkey,
+                            "reasoning": analysis.get("reasoning", ""),
+                            "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
+                            "favorite": "FALSE",
+                            "date_added": datetime.now().strftime("%Y-%m-%d"),
+                        }
+                        newly_added_houses.append(house_for_email)
+                else:
+                    # Still fails: update skip reason
+                    _delete_row_by_index(ws_skipped, row_idx)
+                    mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
+                    _write_skipped_row(ws_skipped, listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
+                    print(f"    → Dungeon:{d} SKIP (re-analyzed from pending)")
+                    count_score_skip += 1
+
+                count_pending_analyzed += 1
+
+            if count_pending_analyzed > 0:
+                print(f"  Re-analyzed {count_pending_analyzed} pending listing(s)")
+
     # ── 8. Summary ────────────────────────────────────────────────────────────
     tok_in  = token_totals["input"]
     tok_out = token_totals["output"]
@@ -1370,6 +1526,8 @@ def main():
     print(f"  Score skip     : {count_score_skip}")
     print(f"  Errors         : {count_error}")
     print(f"  Shelved (budget): {count_shelved}")
+    if 'count_pending_analyzed' in locals() and count_pending_analyzed > 0:
+        print(f"  Pending re-analyzed: {count_pending_analyzed}")
     print(f"  Added to sheet : {count_added}")
     # Count descriptions and walk_scores calls (they're only made for non-sparse listings that pass pre-filter)
     descriptions = api_call_stats.get('walk_scores', 0)  # descriptions called same # of times as walk_scores

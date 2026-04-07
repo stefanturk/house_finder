@@ -499,7 +499,8 @@ def _get_skipped_sheet() -> tuple[gspread.Worksheet, gspread.Spreadsheet]:
 
 def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mode_str: str, skip_reason: str) -> None:
     """Write a skipped listing row to the Skipped Houses tab.
-    Includes available scores if analysis exists, empty otherwise."""
+    Includes available scores if analysis exists, empty otherwise.
+    Uses append_row (adds to end) instead of insert_row to avoid quota exhaustion."""
     zpid = listing["zpid"]
     lot_sqft = listing["lot_sqft"]
     lot_str = f"{lot_sqft:,.0f}" if lot_sqft else ""
@@ -545,8 +546,8 @@ def _write_skipped_row(ws: gspread.Worksheet, listing: dict, analysis: dict, mod
         mode_str,                                                    # S (Mode)
         skip_reason,                                                 # T (Skip Reason)
     ]
-    # Insert at row 2 (right after header) so new listings appear at the top
-    _sheets_call(lambda: ws.insert_row(row, index=2, value_input_option="USER_ENTERED"))
+    # Append to end (no shift cost). Qualifying listings use insert_row(index=2) at top.
+    _sheets_call(lambda: ws.append_row(row, value_input_option="USER_ENTERED"))
 
 
 def _load_pending_rows(ws_skipped: gspread.Worksheet) -> list:
@@ -874,6 +875,11 @@ def _passes_prefilter(listing: dict) -> tuple[bool, str]:
     # Check price (use rent prices if in rent mode, buy prices otherwise)
     try:
         price = int(listing.get("price") or 0)
+
+        # For rent: reject $0 price immediately (indicates missing data from API)
+        if LISTING_STATUS == "For_Rent" and price == 0:
+            return False, "price missing (API returned $0)"
+
         if LISTING_STATUS == "For_Rent":
             min_price, max_price = RENT_PRICE_MIN, RENT_PRICE_MAX
         else:

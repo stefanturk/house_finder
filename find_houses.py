@@ -1514,7 +1514,8 @@ def main():
                     new_skip_reason = "Pending (Claude error on re-analysis)"
                     _delete_row_by_index(ws_skipped, row_idx)
                     mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-                    _write_skipped_row(ws_skipped, listing, None, mode_str, new_skip_reason)
+                    row = _build_skipped_row(listing, None, mode_str, new_skip_reason)
+                    _write_skipped_rows_batch(ws_skipped, [row])
                     print(f"    → Claude error, marked as pending")
                     count_pending_analyzed += 1
                     continue
@@ -1565,7 +1566,8 @@ def main():
                     # Still fails: update skip reason
                     _delete_row_by_index(ws_skipped, row_idx)
                     mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-                    _write_skipped_row(ws_skipped, listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
+                    row = _build_skipped_row(listing, analysis, mode_str, f"Dungeon score {d} < {MIN_DUNGEON_SCORE}")
+                    _write_skipped_rows_batch(ws_skipped, [row])
                     print(f"    → Dungeon:{d} SKIP (re-analyzed from pending)")
                     count_score_skip += 1
 

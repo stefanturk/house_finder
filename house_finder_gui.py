@@ -303,8 +303,54 @@ def run_search():
     return Response(stream(), mimetype="text/event-stream")
 
 
+def _kill_existing_process_on_port(port=5001):
+    """Kill any existing process running on the given port."""
+    try:
+        # Use lsof to find process ID on the port (macOS/Linux)
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.stdout.strip():
+            pid = result.stdout.strip().split('\n')[0]
+            if pid.isdigit():
+                os.kill(int(pid), 9)
+                print(f"  ✓ Killed existing process (PID {pid}) on port {port}")
+                time.sleep(0.5)  # Brief pause to allow port to be released
+    except subprocess.TimeoutExpired:
+        pass
+    except FileNotFoundError:
+        # lsof not available, try alternative method with netstat (Windows/fallback)
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            for line in result.stdout.split('\n'):
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    if parts:
+                        pid = parts[-1]
+                        if pid.isdigit():
+                            os.kill(int(pid), 9)
+                            print(f"  ✓ Killed existing process (PID {pid}) on port {port}")
+                            time.sleep(0.5)
+                            break
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     import socket
+
+    # Kill any existing process on port 5001 before binding
+    _kill_existing_process_on_port(5001)
 
     # Try to get the actual local network IP
     try:

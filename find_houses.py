@@ -1204,6 +1204,13 @@ def main():
     try:
         ws, spreadsheet = _get_sheet()
         ws_skipped, _ = _get_skipped_sheet()
+        # Also load the opposite mode tab (for cross-mode deduplication)
+        # If in rent mode, load buy tab; if in buy mode, load rent tab
+        opposite_tab = RENT_SHEET_TAB if LISTING_STATUS == "ForSale" else SHEET_TAB
+        try:
+            ws_opposite = spreadsheet.worksheet(opposite_tab)
+        except gspread.exceptions.WorksheetNotFound:
+            ws_opposite = None  # Opposite tab doesn't exist yet
         print(f"  Connected to '{SHEET_TAB}' and '{SKIPPED_SHEET_TAB}'.")
     except Exception as e:
         print(f"  Sheets error: {e}")
@@ -1220,10 +1227,14 @@ def main():
             _write_skipped_rows_batch(ws_skipped, skipped_rows_buffer)
             skipped_rows_buffer = []
 
-    # ── 2. Load processed zpids from both active and skipped tabs ──────────────
+    # ── 2. Load processed zpids from both modes + skipped tabs ──────────────────
     print("\nLoading processed listings...")
+    # Load from active tab, opposite tab, and skipped (to prevent cross-mode duplicates)
     processed = _load_processed_zpids_from_sheets(ws, ws_skipped)
-    print(f"  {len(processed)} already processed (across both tabs)")
+    if ws_opposite:
+        opposite_processed = _load_processed_zpids_from_sheets(ws_opposite, None)
+        processed = processed.union(opposite_processed)
+    print(f"  {len(processed)} already processed (across all tabs)")
 
     # ── 3. Fetch listings ─────────────────────────────────────────────────────
     polygons = _load_polygons()

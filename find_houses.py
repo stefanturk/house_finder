@@ -50,8 +50,9 @@ import anthropic
 from dotenv import load_dotenv
 from email_digest import send_email
 
-# Load environment variables from .env file (if it exists)
-load_dotenv()
+# Load environment variables from .env file in this directory
+env_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".env")
+load_dotenv(env_path)
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
 

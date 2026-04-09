@@ -24,8 +24,9 @@ from google.oauth2.service_account import Credentials
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
-# Load environment variables from .env file (if it exists)
-load_dotenv()
+# Load environment variables from .env file in this directory
+env_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".env")
+load_dotenv(env_path)
 
 app = Flask(__name__)
 POLYGONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polygons.json")
@@ -285,12 +286,15 @@ def run_search():
             if mode == "rent":
                 cmd.append("--rent")
 
+            # Explicitly pass environment variables to subprocess
+            env = os.environ.copy()
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                env=env
             )
             for line in proc.stdout:
                 yield f"data: {line.rstrip()}\n\n"

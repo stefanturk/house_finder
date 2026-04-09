@@ -442,15 +442,24 @@ def _write_sheet_row(ws: gspread.Worksheet, listing: dict, analysis: dict) -> No
 
 def _load_processed_zpids_from_sheets(ws_active: gspread.Worksheet, ws_skipped: gspread.Worksheet) -> set:
     """Load all zpids from both the active tab (Buy/Rent Finder) and Skipped tab.
-    Returns union of zpids — these are already processed and should be skipped."""
+    Returns union of zpids — these are already processed and should be skipped.
+
+    NOTE: Excludes error rows (Claude API error, etc.) from Skipped Houses so they
+    get re-analyzed on next run if the error was temporary."""
     zpids = set()
-    for ws in [ws_active, ws_skipped]:
+    for ws, is_skipped in [(ws_active, False), (ws_skipped, True)]:
         if ws is None:
             continue
         try:
             rows = ws.get_all_values()
             for row in rows[1:]:  # skip header
                 if row and len(row) > 1:  # Check row exists and has at least 2 columns
+                    # For Skipped Houses: exclude error rows (skip reason = "Claude API error", etc.)
+                    if is_skipped and len(row) > 19:
+                        skip_reason = row[19]  # Column T (index 19) = Skip Reason
+                        if "Claude API error" in skip_reason:
+                            continue  # Don't count this as processed; re-analyze next run
+
                     # Zillow Link is column B (index 1), format: "https://www.zillow.com/homedetails/ZPID_zpid/"
                     link = row[1]
                     match = re.search(r'(\d+)_zpid', link)
@@ -1478,26 +1487,25 @@ def main():
         print(f"    Dungeon:{d} Backyard:{b} Light:{l} Hood:{n} Turnkey:{turnkey} Overall:{overall}")
 
         if d >= MIN_DUNGEON_SCORE:
-            # Collect houses with Overall > 3 for email digest
-            if overall > 3:
-                house_for_email = {
-                    "address": listing["address"],
-                    "price": _format_price(listing["price"]),
-                    "type": analysis.get("property_type", listing.get("home_type", "")),
-                    "beds": listing["bedrooms"],
-                    "baths": listing["bathrooms"],
-                    "overall": overall,
-                    "dungeon": d,
-                    "backyard": b,
-                    "lighting": l,
-                    "neighborhood": n,
-                    "turnkey": turnkey,
-                    "reasoning": analysis.get("reasoning", ""),
-                    "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
-                    "favorite": "FALSE",
-                    "date_added": datetime.now().strftime("%Y-%m-%d"),
-                }
-                newly_added_houses.append(house_for_email)
+            # Collect all qualifying houses for email digest
+            house_for_email = {
+                "address": listing["address"],
+                "price": _format_price(listing["price"]),
+                "type": analysis.get("property_type", listing.get("home_type", "")),
+                "beds": listing["bedrooms"],
+                "baths": listing["bathrooms"],
+                "overall": overall,
+                "dungeon": d,
+                "backyard": b,
+                "lighting": l,
+                "neighborhood": n,
+                "turnkey": turnkey,
+                "reasoning": analysis.get("reasoning", ""),
+                "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
+                "favorite": "FALSE",
+                "date_added": datetime.now().strftime("%Y-%m-%d"),
+            }
+            newly_added_houses.append(house_for_email)
 
             _write_sheet_row(ws, listing, analysis)
             print(f"    → ADDED ✓")
@@ -1566,31 +1574,30 @@ def main():
                         print(f"    → Dungeon:{d} ADDED ✓ (re-analyzed from pending)")
                         count_added += 1
 
-                    # Collect for email if overall > 3
+                    # Collect for email (all qualifying houses)
                     b = analysis.get("backyard_score", 0)
                     l = analysis.get("lighting_score", 0)
                     n = analysis.get("neighborhood_score", 0)
                     turnkey = analysis.get("turnkey_score", 0)
                     overall = round((d + b + l + n + turnkey) / 5, 1) if any([d, b, l, n, turnkey]) else 0
-                    if overall > 3:
-                        house_for_email = {
-                            "address": listing["address"],
-                            "price": _format_price(listing["price"]),
-                            "type": analysis.get("property_type", listing.get("home_type", "")),
-                            "beds": listing["bedrooms"],
-                            "baths": listing["bathrooms"],
-                            "overall": overall,
-                            "dungeon": d,
-                            "backyard": b,
-                            "lighting": l,
-                            "neighborhood": n,
-                            "turnkey": turnkey,
-                            "reasoning": analysis.get("reasoning", ""),
-                            "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
-                            "favorite": "FALSE",
-                            "date_added": datetime.now().strftime("%Y-%m-%d"),
-                        }
-                        newly_added_houses.append(house_for_email)
+                    house_for_email = {
+                        "address": listing["address"],
+                        "price": _format_price(listing["price"]),
+                        "type": analysis.get("property_type", listing.get("home_type", "")),
+                        "beds": listing["bedrooms"],
+                        "baths": listing["bathrooms"],
+                        "overall": overall,
+                        "dungeon": d,
+                        "backyard": b,
+                        "lighting": l,
+                        "neighborhood": n,
+                        "turnkey": turnkey,
+                        "reasoning": analysis.get("reasoning", ""),
+                        "zillow_link": f"https://www.zillow.com/homedetails/{listing['zpid']}_zpid/",
+                        "favorite": "FALSE",
+                        "date_added": datetime.now().strftime("%Y-%m-%d"),
+                    }
+                    newly_added_houses.append(house_for_email)
                 else:
                     # Still fails: update skip reason
                     # Preserve the original mode from the row (don't use current LISTING_STATUS)
@@ -1642,10 +1649,10 @@ def main():
     # ── 9. Email new qualifying houses ────────────────────────────────────────
     if newly_added_houses:
         mode_str = "rent" if LISTING_STATUS == "For_Rent" else "buy"
-        print(f"Sending email for {len(newly_added_houses)} qualifying house(s)...")
+        print(f"Sending email for {len(newly_added_houses)} new house(s)...")
         send_email(newly_added_houses, mode=mode_str)
     else:
-        print("No qualifying houses with Overall > 3. Email not sent.")
+        print("No new houses added. Email not sent.")
 
 
 if __name__ == "__main__":

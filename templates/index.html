@@ -716,7 +716,7 @@
                         markersArray.push(marker);
                     });
 
-                    log(`✓ Loaded ${data.length} ${mode} listing(s) on map`);
+                    // Silently update map (polls every 5 seconds in background)
                     applyFilters();
                 })
                 .catch(err => { log(`ℹ Could not load listings: ${err}`); console.error('Load listings error:', err); });
